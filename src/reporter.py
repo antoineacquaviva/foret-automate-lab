@@ -1,10 +1,5 @@
-"""
-Générateur du bilan complet de campagne (Markdown & CSV analytiques) :
-  - Podium Pareto (Top 15 global & Champions par axe)
-  - Analyse de sensibilité marginale de chaque Option (O1..O5) et Paramètre (P1..P3)
-  - Bilan dédié à la Métrique de Simplicité (gestes physiques & opérations cognitives)
-  - Matrice de réponse aux 6 Doctrines de Parade Iso-Effort
-  - Dynamique temporelle tour par tour de la variante #1
+﻿"""
+Générateur du bilan complet de campagne (Markdown & CSV analytiques).
 """
 from pathlib import Path
 from typing import Dict, Any
@@ -44,14 +39,12 @@ def generate_campaign_report(
         P3_duree_tours=int(top1["P3_duree_tours"]),
     )
 
-    # Profil temporel tour par tour de la variante #1 (table standard 4J, effort 50%)
     t_profile = simulate_turn_by_turn_profile(
         top1_spec, n_players=4, effort_rate=0.50, n_games=max(300, n_games), seed=4242
     )
     df_profile = pd.DataFrame(t_profile)
     df_profile.to_csv(output_md_path.parent / "top1_turn_profile.csv", index=False)
 
-    # Analyse de sensibilité marginale
     factors = [
         "O1_eligibilite",
         "O2_boost",
@@ -101,31 +94,24 @@ def generate_campaign_report(
     df_sens.to_csv(output_md_path.parent / "sensitivity_analysis.csv", index=False)
 
     lines = []
-    lines.append(f"# Bilan de Campagne — Banc d'Essai Automate Forêt (`{config.get('campaign_name')}`)
-")
-    lines.append("## 1. Synthèse d'Exécution & Métriques de Référence
-")
+    lines.append(f"# Bilan de Campagne — Banc d'Essai Automate Forêt (`{config.get('campaign_name')}`)\n")
+    lines.append("## 1. Synthèse d'Exécution & Métriques de Référence\n")
     lines.append(f"* **Variantes cartésiennes évaluées :** `{total_variants:,}` (dont `{pareto_count}` sur le Front de Pareto 4D non-dominé)")
     lines.append(f"* **Volume de simulation :** `{total_games:,}` parties complètes (`{n_games}` parties MC × `6` Doctrines × `{len(player_counts)}` tailles de table × `{len(effort_rates)}` niveaux d'effort)")
-    lines.append(f"* **Temps de calcul :** `{total_duration_sec:.1f} s` sur `{n_workers}` workers (`{total_games / max(0.01, total_duration_sec):,.0f}` parties/s)
-")
+    lines.append(f"* **Temps de calcul :** `{total_duration_sec:.1f} s` sur `{n_workers}` workers (`{total_games / max(0.01, total_duration_sec):,.0f}` parties/s)\n")
 
-    lines.append("### Variante #1 Recommandée (Meilleur Compromis Global Pareto)
-")
+    lines.append("### Variante #1 Recommandée (Meilleur Compromis Global Pareto)\n")
     lines.append(f"* **Identifiant :** **`{top1['code']}`** (Score Global : **`{top1['score_global']}/100`** | Pareto 4D : `{bool(top1['is_pareto_4d'])}`)")
     lines.append(f"* **Options retenues :** Éligibilité=`{top1['O1_eligibilite']}` | Boost=`{top1['O2_boost']}` | Apprentissage=`{top1['O3_apprentissage']}` | Piste initiale=`{top1['O4_init_piste']}` | Score=`{top1['O5_score_souches']}`")
     lines.append(f"* **Paramètres retenus :** Topologie=`{top1['P1_topologie']}` | Vague=`{top1['P2_largeur_vague']}` | Durée=`{top1['P3_duree_tours']} tours`")
-    lines.append(f"* **Profil des 4 Métriques :**")
+    lines.append("* **Profil des 4 Métriques :**")
     lines.append(f"  * **M1 — Intérêt Stratégique (`{top1['M1_maitrise']}/100`) :** Gain de lecture `+{top1['gain_lecture_vs_uniforme']}%` vs parade aveugle (`+{top1['ecart_lecture_vs_contretemps']}%` vs contre-temps)")
     lines.append(f"  * **M2 — Résilience & Bascule Adaptative (`{top1['M2_adaptation']}/100`) :** Part des Terrassiers au centre (6-7-8) passant de `{top1['centre_terrassier_debut_pct']}%` (début) à `{top1['centre_terrassier_fin_pct']}%` (fin)")
     lines.append(f"  * **M3 — Équilibre & Tension (`{top1['M3_tension']}/100`) :** Fin de partie moyenne à `{top1['arbres_fin_pct']}%` Arbres, `{top1['souches_fin_pct']}%` Souches, `{top1['terrasses_fin_pct']}%` Terrassés (patinage : `{top1['taux_patinage_pct']}%`)")
-    lines.append(f"  * **M4 — Simplicité & Fluidité Table (`{top1['M4_simplicite']}/100`) :** `{top1['gestes_phys_par_tour']}` gestes physiques/tour et `{top1['ops_cog_par_tour']}` opérations cognitives/tour
-")
+    lines.append(f"  * **M4 — Simplicité & Fluidité Table (`{top1['M4_simplicite']}/100`) :** `{top1['gestes_phys_par_tour']}` gestes physiques/tour et `{top1['ops_cog_par_tour']}` opérations cognitives/tour\n")
 
-    lines.append("---
-")
-    lines.append("## 2. Podium Global des 15 Meilleures Variantes
-")
+    lines.append("---\n")
+    lines.append("## 2. Podium Global des 15 Meilleures Variantes\n")
     podium_cols = [
         "rang_global",
         "code",
@@ -140,23 +126,15 @@ def generate_campaign_report(
         "is_pareto_4d",
     ]
     lines.append(df.head(15)[podium_cols].to_markdown(index=False))
-    lines.append("
----
-")
+    lines.append("\n---\n")
 
-    lines.append("## 3. Analyse de Sensibilité Marginale (Impact Moyen par Option & Paramètre)
-")
-    lines.append("Ce tableau mesure l'effet propre de chaque choix de conception (moyenné sur toutes les autres dimensions) sur les 4 métriques et sur la charge de manipulation :
-")
+    lines.append("## 3. Analyse de Sensibilité Marginale (Impact Moyen par Option & Paramètre)\n")
+    lines.append("Ce tableau mesure l'effet propre de chaque choix de conception (moyenné sur toutes les autres dimensions) sur les 4 métriques et sur la charge de manipulation :\n")
     lines.append(df_sens.to_markdown(index=False))
-    lines.append("
----
-")
+    lines.append("\n---\n")
 
-    lines.append("## 4. Matrice de Réponse aux 6 Doctrines de Parade Iso-Effort (Top 5 Variantes)
-")
-    lines.append("Toutes les doctrines utilisent **exactement le même budget total de parades** (`parades_utilisees_moy`), mais distribué différemment :
-")
+    lines.append("## 4. Matrice de Réponse aux 6 Doctrines de Parade Iso-Effort (Top 5 Variantes)\n")
+    lines.append("Toutes les doctrines utilisent **exactement le même budget total de parades** (`parades_utilisees_moy`), mais distribué différemment :\n")
     doc_cols = [
         "rang_global",
         "code",
@@ -169,14 +147,10 @@ def generate_campaign_report(
         "score_D5_Contre_Temps",
     ]
     lines.append(df.head(5)[doc_cols].to_markdown(index=False))
-    lines.append("
----
-")
+    lines.append("\n---\n")
 
-    lines.append(f"## 5. Dynamique Temporelle Tour par Tour de la Variante #1 (`{top1['code']}`)
-")
-    lines.append("Évolution moyenne de l'état de la forêt et de l'occupation du centre de la piste (cases 6-7-8 par les tuiles Terrassier) à 4 joueurs ($ar{P} = 50\%$) :
-")
+    lines.append(f"## 5. Dynamique Temporelle Tour par Tour de la Variante #1 (`{top1['code']}`)\n")
+    lines.append("Évolution moyenne de l'état de la forêt et de l'occupation du centre de la piste (cases 6-7-8 par les tuiles Terrassier) à 4 joueurs ($\\bar{P} = 50\\%$) :\n")
     df_prof_fmt = df_profile.copy()
     df_prof_fmt.columns = [
         "Tour",
@@ -186,8 +160,6 @@ def generate_campaign_report(
         "Tuiles Terrassier au Centre 6-7-8 (%)",
     ]
     lines.append(df_prof_fmt.round(1).to_markdown(index=False))
-    lines.append("
-")
+    lines.append("\n")
 
-    output_md_path.write_text("
-".join(lines), encoding="utf-8")
+    output_md_path.write_text("\n".join(lines), encoding="utf-8")
