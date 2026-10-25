@@ -1,0 +1,71 @@
+{
+  "campaign_name": "campagne_exhaustive_v1",
+  "description": "Exploration cartésienne complète des 2916 variantes de l'automate sur VM.Standard.E5.Flex (8 OCPU / 16 vCPUs)",
+  "hardware": {
+    "max_workers": 14,
+    "nice_level": 15,
+    "chunk_size_variants": 36,
+    "max_ram_gb": 2.5
+  },
+  "simulation": {
+    "n_games_per_eval": 1000,
+    "player_counts": [
+      3,
+      4,
+      5,
+      6
+    ],
+    "effort_rates": [
+      0.3,
+      0.5,
+      0.7
+    ],
+    "base_seed": 20261025
+  },
+  "grid_filter": {
+    "O1_eligibilite": [
+      "Strict",
+      "Souple"
+    ],
+    "O2_boost": [
+      "Sur_Place_x2",
+      "Rasage_Complet",
+      "Debordement"
+    ],
+    "O3_apprentissage": [
+      "Standard_1",
+      "Boost_Turbo_2",
+      "Cumulatif_K"
+    ],
+    "O4_init_piste": [
+      "6C_5T_Centre_Coupe",
+      "6C_5T_Alterne",
+      "5C_6T_Pression_Terre"
+    ],
+    "O5_score_souches": [
+      "Arbres_Seuls",
+      "Souches_Demi_Point"
+    ],
+    "P1_topologie": [
+      "6c_15a",
+      "6c_18a",
+      "5c_12a"
+    ],
+    "P2_largeur_vague": [
+      "Proportionnel_Sup",
+      "Proportionnel_Large",
+      "Asymetrique_Front"
+    ],
+    "P3_duree_tours": [
+      12,
+      16,
+      20
+    ]
+  },
+  "metrics_weights": {
+    "w_maitrise": 0.3,
+    "w_adaptation": 0.25,
+    "w_tension": 0.25,
+    "w_simplicite": 0.2
+  }
+}

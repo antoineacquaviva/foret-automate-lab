@@ -1,0 +1,22 @@
+# Environnement Python & Cache compilation JIT
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.numba_cache/
+
+# Journaux d'exécution
+logs/
+*.log
+
+# Checkpoints intermédiaires lourds (on garde uniquement les rapports finaux .md et .csv dans results/)
+results/*/checkpoints/
+results/*/checkpoint_state.json
+*.tmp
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.vscode/sftp.json
