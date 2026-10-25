@@ -1,28 +1,23 @@
 <#
 .SYNOPSIS
-    Automatise l'initialisation Git/GitHub, le transfert vers la VM Oracle (141.145.218.127),
-    le déploiement de l'environnement Python/Numba et la synchronisation des résultats.
-
-.PARAMETER Action
-    - "init"   : Initialise Git en local, pousse sur GitHub, transfère et installe tout sur la VM.
-    - "sync"   : Envoie les dernières modifications locales sur GitHub et met à jour la VM (git pull).
-    - "run"    : Lance une campagne sur la VM à distance ("quick" ou "full").
-    - "pull"   : Récupère les derniers résultats (rapports .md et .csv) depuis GitHub / la VM.
+    Version v2 robuste — Automatise l'initialisation Git/GitHub, la résolution automatique de la clé SSH
+    et de l'utilisateur OCI (ubuntu vs opc), le transfert vers la VM Oracle (141.145.218.127),
+    et la synchronisation des résultats.
 
 .EXAMPLE
-    .\scripts\deploy_workflow.ps1 -Action init -GitRepoUrl "git@github.com:TON_USER/foret-automate-lab.git"
-    .\scripts\deploy_workflow.ps1 -Action run -CampaignMode "quick"
-    .\scripts\deploy_workflow.ps1 -Action pull
+    .\scripts\deploy_workflow-v2.ps1 -Action init `
+        -GitRepoUrl "https://github.com/antoineacquaviva/foret-automate-lab.git" `
+        -SshKeyPath "oracle-vm"
 #>
 param(
     [ValidateSet("init", "sync", "run", "pull", "status")]
     [string]$Action = "init",
 
     [string]$VmHost = "141.145.218.127",
-    [string]$VmUser = "ubuntu",
-    [string]$SshKeyPath = "$HOME\.ssh\id_rsa",
+    [string]$VmUser = "auto",
+    [string]$SshKeyPath = "oracle-vm",
     [string]$RemoteDir = "~/foret-automate-lab",
-    [string]$GitRepoUrl = "",
+    [string]$GitRepoUrl = "https://github.com/antoineacquaviva/foret-automate-lab.git",
     [ValidateSet("quick", "full")]
     [string]$CampaignMode = "quick",
     [int]$Workers = 14
@@ -32,25 +27,104 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectRoot
 
-# Construction des options SSH/SCP
-$SshOpts = @("-o", "StrictHostKeyChecking=accept-new")
-if (Test-Path $SshKeyPath) {
-    $SshOpts += @("-i", $SshKeyPath)
+# ------------------------------------------------------------------------------
+# 1. Résolution intelligente du chemin de la clé SSH (ou alias dans ~/.ssh/config)
+# ------------------------------------------------------------------------------
+function Resolve-SshConnection {
+    param([string]$InputKey, [string]$HostIp, [string]$RequestedUser)
+
+    $ResolvedKey = $null
+    $Candidates = @(
+        $InputKey,
+        (Join-Path $ProjectRoot $InputKey),
+        (Join-Path "$HOME\.ssh" $InputKey),
+        (Join-Path "$HOME\.ssh" "$InputKey.key"),
+        (Join-Path "$HOME\.ssh" "$InputKey.pem"),
+        (Join-Path "$HOME\Downloads" $InputKey),
+        (Join-Path "$HOME\Downloads" "$InputKey.key")
+    )
+    foreach ($c in $Candidates) {
+        if ($c -and (Test-Path $c -PathType Leaf)) {
+            $ResolvedKey = (Resolve-Path $c).Path
+            break
+        }
+    }
+
+    # Vérifier si $InputKey est en réalité un Host défini dans ~/.ssh/config
+    $SshConfigPath = "$HOME\.ssh\config"
+    $IsSshAlias = $false
+    if ((-not $ResolvedKey) -and (Test-Path $SshConfigPath)) {
+        $cfgText = Get-Content $SshConfigPath -Raw
+        if ($cfgText -match "(?m)^\s*Host\s+.*\b$([regex]::Escape($InputKey))\b") {
+            $IsSshAlias = $true
+        }
+    }
+
+    if ($IsSshAlias) {
+        Write-Host "[SSH] Alias '$InputKey' détecté dans ~/.ssh/config." -ForegroundColor Green
+        return @{
+            Target = $InputKey
+            SshOpts = @("-o", "StrictHostKeyChecking=accept-new")
+        }
+    }
+
+    if (-not $ResolvedKey) {
+        Write-Host "[ERREUR SSH] Impossible de trouver le fichier de clé privée '$InputKey' !" -ForegroundColor Red
+        Write-Host "Chemins testés : dossier courant, $HOME\.ssh\, $HOME\Downloads\." -ForegroundColor Yellow
+        if (Test-Path "$HOME\.ssh") {
+            Write-Host "Fichiers présents dans $HOME\.ssh :" -ForegroundColor Cyan
+            Get-ChildItem "$HOME\.ssh" | Select-Object -ExpandProperty Name | ForEach-Object { Write-Host "  - $_" }
+        }
+        throw "Veuillez passer le chemin exact de votre clé privée OCI via -SshKeyPath (ex: -SshKeyPath `"$HOME\.ssh\ma_cle.key`")"
+    }
+
+    Write-Host "[SSH] Clé privée trouvée : $ResolvedKey" -ForegroundColor Green
+    $Opts = @("-i", $ResolvedKey, "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10")
+
+    # Auto-détection de l'utilisateur OCI (ubuntu vs opc)
+    $UsersToTry = if ($RequestedUser -eq "auto") { @("ubuntu", "opc") } else { @($RequestedUser, "ubuntu", "opc") | Select-Object -Unique }
+    foreach ($u in $UsersToTry) {
+        Write-Host "[SSH] Test de connexion avec l'utilisateur '$u@$HostIp'..." -ForegroundColor DarkGray
+        & ssh @Opts -o BatchMode=yes "$u@$HostIp" "exit 0" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[SSH] Connexion validée sur $u@$HostIp !" -ForegroundColor Green
+            return @{
+                Target = "$u@$HostIp"
+                SshOpts = $Opts
+            }
+        }
+    }
+
+    throw "Échec d'authentification SSH sur $HostIp avec la clé '$ResolvedKey' (utilisateurs testés : $($UsersToTry -join ', ')). Vérifiez que c'est bien la clé associée à la VM dans la console Oracle."
 }
-$Target = "$VmUser@$VmHost"
+
+$Conn = Resolve-SshConnection -InputKey $SshKeyPath -HostIp $VmHost -RequestedUser $VmUser
+$Target = $Conn.Target
+$SshOpts = $Conn.SshOpts
 
 function Invoke-VmCommand([string]$RemoteCmd) {
     Write-Host "[SSH -> $Target] $RemoteCmd" -ForegroundColor Cyan
     & ssh @SshOpts $Target $RemoteCmd
+    if ($LASTEXITCODE -ne 0) {
+        throw "La commande distante a échoué (code $LASTEXITCODE) : $RemoteCmd"
+    }
 }
 
 switch ($Action) {
     "init" {
         Write-Host "=== 1. INITIALISATION GIT LOCALE ===" -ForegroundColor Green
+        git config core.autocrlf false
         if (-not (Test-Path ".git")) {
             git init
             git branch -M main
         }
+
+        # Forcer les fins de ligne LF sur les scripts .sh avant commit
+        Get-ChildItem -Path "$ProjectRoot\scripts\*.sh" | ForEach-Object {
+            $content = [System.IO.File]::ReadAllText($_.FullName) -replace "`r`n", "`n"
+            [System.IO.File]::WriteAllText($_.FullName, $content)
+        }
+
         git add .
         $status = git status --porcelain
         if ($status) {
@@ -65,23 +139,20 @@ switch ($Action) {
                 git remote set-url origin $GitRepoUrl
             }
             Write-Host "Envoi vers GitHub ($GitRepoUrl)..." -ForegroundColor Green
-            git push -u origin main
-        } elseif (Get-Command gh -ErrorAction SilentlyContinue) {
-            Write-Host "Création du dépôt privé sur GitHub via GitHub CLI (gh)..." -ForegroundColor Green
-            gh repo create foret-automate-lab --private --source=. --remote=origin --push
-            $GitRepoUrl = (git remote get-url origin).Trim()
-        } else {
-            Write-Host "[INFO] Aucun GitRepoUrl fourni : déploiement direct par archive SCP vers la VM." -ForegroundColor Yellow
+            try {
+                git push -u origin main
+            } catch {
+                Write-Host "[AVERTISSEMENT GIT] Le push vers '$GitRepoUrl' a échoué." -ForegroundColor Yellow
+                if ($GitRepoUrl -like "git@github.com:*") {
+                    $HttpsUrl = $GitRepoUrl -replace "^git@github\.com:", "https://github.com/"
+                    Write-Host "Bascule automatique vers HTTPS ($HttpsUrl) via Git Credential Manager..." -ForegroundColor Cyan
+                    git remote set-url origin $HttpsUrl
+                    git push -u origin main
+                }
+            }
         }
 
         Write-Host "=== 2. TRANSFERT & DÉPLOIEMENT SUR LA VM ($Target) ===" -ForegroundColor Green
-        # Conversion des fins de ligne CRLF -> LF sur les scripts shell avant envoi
-        Get-ChildItem -Path "$ProjectRoot\scripts\*.sh" | ForEach-Object {
-            $content = [System.IO.File]::ReadAllText($_.FullName) -replace "`r`n", "`n"
-            [System.IO.File]::WriteAllText($_.FullName, $content)
-        }
-
-        # Création d'une archive temporaire légère (sans .venv ni checkpoints)
         $TmpTar = "$env:TEMP\foret-automate-deploy.tar.gz"
         if (Test-Path $TmpTar) { Remove-Item $TmpTar -Force }
         tar -czf $TmpTar --exclude=".venv" --exclude="__pycache__" --exclude="logs" --exclude="results" .
@@ -89,9 +160,11 @@ switch ($Action) {
         Invoke-VmCommand "mkdir -p $RemoteDir"
         Write-Host "[SCP -> $Target] Transfert de l'archive vers $RemoteDir..." -ForegroundColor Cyan
         & scp @SshOpts $TmpTar "${Target}:${RemoteDir}/deploy.tar.gz"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Le transfert SCP vers $Target a échoué."
+        }
         Remove-Item $TmpTar -Force
 
-        # Extraction, liaison Git et installation sur la VM
         $RemoteSetupCmd = "cd $RemoteDir && tar -xzf deploy.tar.gz && rm deploy.tar.gz && ./scripts/setup_vm.sh"
         Invoke-VmCommand $RemoteSetupCmd
     }
@@ -104,14 +177,8 @@ switch ($Action) {
             $msg = "Mise à jour paramètres/code ($(Get-Date -Format 'yyyy-MM-dd HH:mm'))"
             git commit -m $msg
         }
-        $remotes = git remote
-        if ($remotes -contains "origin") {
-            git push origin main
-            Invoke-VmCommand "cd $RemoteDir && git pull --rebase origin main"
-        } else {
-            Write-Host "Pas de remote Git configuré, synchronisation directe via SCP..." -ForegroundColor Yellow
-            & $PSCommandPath -Action init -VmHost $VmHost -VmUser $VmUser -SshKeyPath $SshKeyPath
-        }
+        git push origin main
+        Invoke-VmCommand "cd $RemoteDir && git pull --rebase origin main"
     }
 
     "run" {
@@ -126,10 +193,6 @@ switch ($Action) {
 
     "pull" {
         Write-Host "=== RAPATRIEMENT DES RÉSULTATS DE CAMPAGNE ===" -ForegroundColor Green
-        $remotes = git remote
-        if ($remotes -contains "origin") {
-            git pull origin main
-        }
         New-Item -ItemType Directory -Force -Path "$ProjectRoot\results" | Out-Null
         Write-Host "[SCP <- $Target] Téléchargement des rapports Markdown et CSV..." -ForegroundColor Cyan
         & scp @SshOpts -r "${Target}:${RemoteDir}/results/*" "$ProjectRoot\results\"
