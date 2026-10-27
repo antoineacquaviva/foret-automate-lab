@@ -496,7 +496,8 @@ export function breedOffspringGenome(
   parentB: EvaluatedAutomatonV2,
   newId: number,
   generation: number,
-  maxComplexityAllowed = 5.0
+  maxComplexityAllowed = 5.0,
+  creativeMutationRate = 0.25
 ): CompiledGenomeSpec {
   const child = new Int32Array(GENOME_SIZE);
   child.set(parentA.genome);
@@ -531,9 +532,12 @@ export function breedOffspringGenome(
     mutTag = 'PARAM';
   }
 
-  // 3. Mutations Structurelles Créatives (inspirées de NEAT / Occam)
+  // 3. Mutations Structurelles Créatives (inspirées de NEAT / Occam, pilotées par creativeMutationRate)
   const rStruct = Math.random();
-  if (rStruct < 0.18) {
+  const pGreffe = creativeMutationRate * 0.45;
+  const pOccam = creativeMutationRate * 0.80;
+  const pGlobale = Math.min(0.95, creativeMutationRate * 1.25);
+  if (rStruct < pGreffe) {
     // Greffe de Slot Conditionnel (Effet Boost sur case monochrome ou Effet Domino à +1 case)
     const tacIdx = Math.floor(Math.random() * 4);
     const sBase = OFFSET_TACTICS + tacIdx * 64 + 4 + 2 * 15; // Slot 3 (index 2)
@@ -566,13 +570,13 @@ export function breedOffspringGenome(
       child[sBase + 13] = 1;
       mutTag = 'GREFFE_DOMINO';
     }
-  } else if (rStruct < 0.36) {
+  } else if (rStruct < pOccam) {
     // Élagage d'Occam (Pruning Mutation : désactive un 3e Slot ou simplifie une condition pour bondir en M4 Simplicité)
     const tacIdx = Math.floor(Math.random() * 4);
     const sBase = OFFSET_TACTICS + tacIdx * 64 + 4 + 2 * 15;
     for (let k = 0; k < 15; k++) child[sBase + k] = 0;
     mutTag = 'OCCAM_PRUNE';
-  } else if (rStruct < 0.52) {
+  } else if (rStruct < pGlobale) {
     // Mutation de Mécanique Globale (Casse, Élan, Rebond ou Flip Recto-Verso)
     child[HDR_BREAK_RULE] = Math.floor(Math.random() * 3);
     child[HDR_MOMENTUM_RULE] = Math.random() < 0.45 ? 1 : 0;

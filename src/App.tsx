@@ -104,10 +104,14 @@ export default function App() {
   // View 2: Configurateur de Campagne, Bots & Pondérations
   const [explorationMode, setExplorationMode] = useState<ExplorationMode>('grid_sh');
   const [useMultiFidelitySh, setUseMultiFidelitySh] = useState<boolean>(true);
-  const [scaleGamesFactor, setScaleGamesFactor] = useState<number>(20); // Base MC games per bot in Rung 1
-  const [gaPopSize, setGaPopSize] = useState<number>(36);
-  const [gaGenerations, setGaGenerations] = useState<number>(5);
-  const [maxAllowedComplexity, setMaxAllowedComplexity] = useState<number>(4.5);
+  const [scaleGamesFactor, setScaleGamesFactor] = useState<number>(30); // Base MC games per bot
+  const [gaPopSize, setGaPopSize] = useState<number>(64);
+  const [gaGenerations, setGaGenerations] = useState<number>(12);
+  const [creativeMutationRate, setCreativeMutationRate] = useState<number>(0.3);
+  const [maxAllowedComplexity, setMaxAllowedComplexity] = useState<number>(6.0);
+  const [enabledBots, setEnabledBots] = useState<string[]>(() =>
+    ALL_BOTS_V2.map((b) => b.code)
+  );
 
   const [playerCounts, setPlayerCounts] = useState<number[]>([3, 4, 5, 6]);
   const [effortRates, setEffortRates] = useState<number[]>([0.3, 0.5, 0.7]);
@@ -527,7 +531,14 @@ export default function App() {
                 ? archiveList[Math.floor(Math.random() * archiveList.length)]
                 : paretoPool[Math.floor(Math.random() * paretoPool.length)];
             nextGenSpecs.push(
-              breedOffspringGenome(parentA, parentB, nextId++, gen + 1, maxAllowedComplexity)
+              breedOffspringGenome(
+                parentA,
+                parentB,
+                nextId++,
+                gen + 1,
+                maxAllowedComplexity,
+                creativeMutationRate
+              )
             );
           }
           currentSpecs = nextGenSpecs;
@@ -845,7 +856,14 @@ export default function App() {
 
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="block text-slate-400 mb-1">Mode Fin de Piste</label>
+                        <label className="flex items-center justify-between text-slate-400 mb-1">
+                          <span>Mode Fin de Piste</span>
+                          {typeof activeFamily.arena.end_of_track_mode !== 'string' && (
+                            <span className="text-[10px] font-mono text-amber-400">
+                              $SWEEP ({activeFamily.arena.end_of_track_mode.$sweep.length})
+                            </span>
+                          )}
+                        </label>
                         <select
                           value={
                             typeof activeFamily.arena.end_of_track_mode === 'string'
@@ -869,7 +887,14 @@ export default function App() {
                       </div>
 
                       <div>
-                        <label className="block text-slate-400 mb-1">Loi de Casse (Break Rule)</label>
+                        <label className="flex items-center justify-between text-slate-400 mb-1">
+                          <span>Loi de Casse (Break Rule)</span>
+                          {typeof activeFamily.machines_physics.break_rule !== 'string' && (
+                            <span className="text-[10px] font-mono text-amber-400">
+                              $SWEEP ({activeFamily.machines_physics.break_rule.$sweep.length})
+                            </span>
+                          )}
+                        </label>
                         <select
                           value={
                             typeof activeFamily.machines_physics.break_rule === 'string'
@@ -898,7 +923,14 @@ export default function App() {
 
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="block text-slate-400 mb-1">Pénalité de Casse</label>
+                        <label className="flex items-center justify-between text-slate-400 mb-1">
+                          <span>Pénalité de Casse</span>
+                          {typeof activeFamily.machines_physics.break_penalty !== 'string' && (
+                            <span className="text-[10px] font-mono text-amber-400">
+                              $SWEEP ({activeFamily.machines_physics.break_penalty.$sweep.length})
+                            </span>
+                          )}
+                        </label>
                         <select
                           value={
                             typeof activeFamily.machines_physics.break_penalty === 'string'
@@ -925,7 +957,14 @@ export default function App() {
                       </div>
 
                       <div>
-                        <label className="block text-slate-400 mb-1">Élan Mécanique (Status +1)</label>
+                        <label className="flex items-center justify-between text-slate-400 mb-1">
+                          <span>Élan Mécanique (Status +1)</span>
+                          {typeof activeFamily.machines_physics.momentum_rule !== 'string' && (
+                            <span className="text-[10px] font-mono text-amber-400">
+                              $SWEEP ({activeFamily.machines_physics.momentum_rule.$sweep.length})
+                            </span>
+                          )}
+                        </label>
                         <select
                           value={
                             typeof activeFamily.machines_physics.momentum_rule === 'string'
@@ -954,7 +993,14 @@ export default function App() {
 
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="block text-slate-400 mb-1">Déclencheur Piste 2D6</label>
+                        <label className="flex items-center justify-between text-slate-400 mb-1">
+                          <span>Déclencheur Piste 2D6</span>
+                          {typeof activeFamily.learning_track.eval_trigger_mode !== 'string' && (
+                            <span className="text-[10px] font-mono text-amber-400">
+                              $SWEEP ({activeFamily.learning_track.eval_trigger_mode.$sweep.length})
+                            </span>
+                          )}
+                        </label>
                         <select
                           value={
                             typeof activeFamily.learning_track.eval_trigger_mode === 'string'
@@ -981,7 +1027,14 @@ export default function App() {
                       </div>
 
                       <div>
-                        <label className="block text-slate-400 mb-1">Opérateur Piste 2D6</label>
+                        <label className="flex items-center justify-between text-slate-400 mb-1">
+                          <span>Opérateur Piste 2D6</span>
+                          {typeof activeFamily.learning_track.geom_move_mode !== 'string' && (
+                            <span className="text-[10px] font-mono text-amber-400">
+                              $SWEEP ({activeFamily.learning_track.geom_move_mode.$sweep.length})
+                            </span>
+                          )}
+                        </label>
                         <select
                           value={
                             typeof activeFamily.learning_track.geom_move_mode === 'string'
@@ -1009,8 +1062,13 @@ export default function App() {
                     </div>
 
                     <div>
-                      <label className="block text-slate-400 mb-1">
-                        Mode de Redressement Final des Souches (Système Piste 3)
+                      <label className="flex items-center justify-between text-slate-400 mb-1">
+                        <span>Mode de Redressement Final des Souches (Système Piste 3)</span>
+                        {typeof activeFamily.scoring.regen_mode !== 'string' && (
+                          <span className="text-[10px] font-mono text-amber-400">
+                            $SWEEP ({activeFamily.scoring.regen_mode.$sweep.length} modes)
+                          </span>
+                        )}
                       </label>
                       <select
                         value={
@@ -1339,13 +1397,33 @@ export default function App() {
            =================================================================== */}
         {activeView === 'config' && (
           <div className="space-y-6">
-            <div className="bg-[#111827] border border-slate-800 p-5">
-              <h1 className="text-xl font-bold text-slate-100">
-                02. Configurateur de Campagne, Banc des 7 Bots & Pondérations Pareto 4D
-              </h1>
-              <p className="text-xs text-slate-400 mt-1">
-                Choisissez entre le Balayage Cartésien Multi-Fidélité à 3 étages (Successive Halving) et l&apos;Algorithme Évolutionnaire Hybride NSGA-II + MAP-Elites (800 niches écologiques).
-              </p>
+            <div className="bg-[#111827] border border-slate-800 p-5 flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h1 className="text-xl font-bold text-slate-100">
+                  02. Configurateur de Campagne, Banc des 7 Bots & Pondérations Pareto 4D
+                </h1>
+                <p className="text-xs text-slate-400 mt-1">
+                  Choisissez entre le Balayage Cartésien Multi-Fidélité à 3 étages (Successive Halving) et l&apos;Algorithme Évolutionnaire Hybride NSGA-II + MAP-Elites (800 niches écologiques).
+                </p>
+              </div>
+
+              <button
+                onClick={() => {
+                  selectPreloadedFamily(2); // Famille_Exploration_Genetique_Totale
+                  setExplorationMode('genetic_qd');
+                  setGaPopSize(64);
+                  setGaGenerations(12);
+                  setCreativeMutationRate(0.35);
+                  setMaxAllowedComplexity(6.5);
+                  setScaleGamesFactor(60);
+                  setPlayerCounts([3, 4, 5, 6]);
+                  setEffortRates([0.3, 0.5, 0.7]);
+                  setEnabledBots(ALL_BOTS_V2.map((b) => b.code));
+                }}
+                className="px-3.5 py-2 text-xs font-semibold bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/50 transition cursor-pointer whitespace-nowrap shrink-0"
+              >
+                ⚡ Charger Pré-Réglage : Exploration Génétique Maximale
+              </button>
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -1410,46 +1488,92 @@ export default function App() {
                         <option value={15}>15 parties/bot (Rapide Web)</option>
                         <option value={30}>30 parties/bot (Équilibré)</option>
                         <option value={60}>60 parties/bot (Haute précision)</option>
+                        <option value={100}>100 parties/bot (Intensif CRN)</option>
                       </select>
                     </div>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-3 gap-3 pt-2 text-xs">
-                    <div className="bg-slate-950 border border-slate-800 p-3">
-                      <label className="block text-slate-400 mb-1">Population P</label>
-                      <select
-                        value={gaPopSize}
-                        onChange={(e) => setGaPopSize(Number(e.target.value))}
-                        className="w-full bg-[#111827] border border-slate-800 px-2 py-1 font-mono text-slate-100"
-                      >
-                        <option value={24}>24 individus</option>
-                        <option value={36}>36 individus</option>
-                        <option value={60}>60 individus</option>
-                      </select>
+                  <div className="space-y-3 pt-2 text-xs">
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className="bg-slate-950 border border-slate-800 p-3">
+                        <label className="block text-slate-400 mb-1">Population P</label>
+                        <select
+                          value={gaPopSize}
+                          onChange={(e) => setGaPopSize(Number(e.target.value))}
+                          className="w-full bg-[#111827] border border-slate-800 px-2 py-1 font-mono text-slate-100"
+                        >
+                          <option value={24}>24 individus</option>
+                          <option value={36}>36 individus</option>
+                          <option value={48}>48 individus</option>
+                          <option value={64}>64 individus (Max)</option>
+                          <option value={96}>96 individus (Ultra)</option>
+                        </select>
+                      </div>
+                      <div className="bg-slate-950 border border-slate-800 p-3">
+                        <label className="block text-slate-400 mb-1">Générations G</label>
+                        <select
+                          value={gaGenerations}
+                          onChange={(e) => setGaGenerations(Number(e.target.value))}
+                          className="w-full bg-[#111827] border border-slate-800 px-2 py-1 font-mono text-slate-100"
+                        >
+                          <option value={4}>4 générations</option>
+                          <option value={6}>6 générations</option>
+                          <option value={8}>8 générations</option>
+                          <option value={10}>10 générations</option>
+                          <option value={12}>12 générations (Max)</option>
+                          <option value={16}>16 générations (Ultra)</option>
+                        </select>
+                      </div>
+                      <div className="bg-slate-950 border border-slate-800 p-3">
+                        <label className="block text-slate-400 mb-1">Plafond C_règle (max 8.0)</label>
+                        <input
+                          type="number"
+                          step={0.5}
+                          min={1.5}
+                          max={8.0}
+                          value={maxAllowedComplexity}
+                          onChange={(e) => setMaxAllowedComplexity(Number(e.target.value))}
+                          className="w-full bg-[#111827] border border-slate-800 px-2 py-1 font-mono text-slate-100"
+                        />
+                      </div>
                     </div>
-                    <div className="bg-slate-950 border border-slate-800 p-3">
-                      <label className="block text-slate-400 mb-1">Générations G</label>
-                      <select
-                        value={gaGenerations}
-                        onChange={(e) => setGaGenerations(Number(e.target.value))}
-                        className="w-full bg-[#111827] border border-slate-800 px-2 py-1 font-mono text-slate-100"
-                      >
-                        <option value={4}>4 générations</option>
-                        <option value={6}>6 générations</option>
-                        <option value={10}>10 générations</option>
-                      </select>
-                    </div>
-                    <div className="bg-slate-950 border border-slate-800 p-3">
-                      <label className="block text-slate-400 mb-1">Plafond C_règle</label>
-                      <input
-                        type="number"
-                        step={0.5}
-                        min={1.5}
-                        max={8.0}
-                        value={maxAllowedComplexity}
-                        onChange={(e) => setMaxAllowedComplexity(Number(e.target.value))}
-                        className="w-full bg-[#111827] border border-slate-800 px-2 py-1 font-mono text-slate-100"
-                      />
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="bg-slate-950 border border-slate-800 p-3 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-300">
+                            Taux de Mutation Créative (NEAT / Occam)
+                          </span>
+                          <span className="font-mono font-bold text-cyan-400">
+                            {Math.round(creativeMutationRate * 100)} %
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0.05}
+                          max={0.5}
+                          step={0.05}
+                          value={creativeMutationRate}
+                          onChange={(e) => setCreativeMutationRate(Number(e.target.value))}
+                          className="w-full accent-cyan-400 cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="bg-slate-950 border border-slate-800 p-3 flex flex-col justify-between">
+                        <label className="text-slate-300">
+                          Fidélité Monte-Carlo / Individu (CRN)
+                        </label>
+                        <select
+                          value={scaleGamesFactor}
+                          onChange={(e) => setScaleGamesFactor(Number(e.target.value))}
+                          className="w-full bg-[#111827] border border-slate-800 px-2 py-1 font-mono text-slate-100 mt-1"
+                        >
+                          <option value={15}>30 parties/bot (2×15 · Rapide)</option>
+                          <option value={30}>60 parties/bot (2×30 · Équilibré)</option>
+                          <option value={40}>80 parties/bot (2×40 · Recommandé)</option>
+                          <option value={60}>120 parties/bot (2×60 · Haute Précision)</option>
+                        </select>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -1538,22 +1662,57 @@ export default function App() {
               </div>
             </div>
 
-            {/* The 7 Autonomous Bots Reference Table */}
+            {/* The 7 Autonomous Bots Reference Table with Active Checkboxes */}
             <div className="bg-[#111827] border border-slate-800 p-5 space-y-3">
-              <h2 className="text-sm font-semibold text-slate-100">
-                3. Banc des 7 Bots Joueurs Autonomes (Iso-Effort + Common Random Numbers)
-              </h2>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold text-slate-100">
+                  3. Banc des 7 Bots Joueurs Autonomes (Iso-Effort + Common Random Numbers)
+                </h2>
+                <div className="flex items-center gap-3 text-xs font-mono">
+                  <span className="text-emerald-400">{enabledBots.length} / 7 Bots activés</span>
+                  <button
+                    onClick={() => setEnabledBots(ALL_BOTS_V2.map((b) => b.code))}
+                    className="px-2.5 py-1 bg-slate-950 hover:bg-slate-800 text-slate-200 border border-slate-800 cursor-pointer"
+                  >
+                    Tout cocher (7/7)
+                  </button>
+                </div>
+              </div>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-                {ALL_BOTS_V2.map((bot) => (
-                  <div key={bot.code} className="bg-slate-950 border border-slate-800 p-3 space-y-1">
-                    <div className="flex items-center justify-between text-xs font-mono">
-                      <span className="text-emerald-400 font-bold">{bot.code}</span>
-                      <span className="text-slate-400">Niveau {bot.level}</span>
-                    </div>
-                    <div className="text-xs font-semibold text-slate-200">{bot.name}</div>
-                    <p className="text-[11px] text-slate-400 leading-relaxed">{bot.description}</p>
-                  </div>
-                ))}
+                {ALL_BOTS_V2.map((bot) => {
+                  const isChecked = enabledBots.includes(bot.code);
+                  return (
+                    <label
+                      key={bot.code}
+                      className={`p-3 space-y-1 border transition cursor-pointer block ${
+                        isChecked
+                          ? 'bg-slate-950 border-emerald-500/40'
+                          : 'bg-slate-950/50 border-slate-800 opacity-60'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-xs font-mono">
+                        <span className="flex items-center gap-2 text-emerald-400 font-bold">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setEnabledBots([...enabledBots, bot.code]);
+                              } else if (enabledBots.length > 2) {
+                                setEnabledBots(enabledBots.filter((c) => c !== bot.code));
+                              }
+                            }}
+                            className="accent-emerald-500"
+                          />
+                          {bot.code}
+                        </span>
+                        <span className="text-slate-400">Niveau {bot.level}</span>
+                      </div>
+                      <div className="text-xs font-semibold text-slate-200">{bot.name}</div>
+                      <p className="text-[11px] text-slate-400 leading-relaxed">{bot.description}</p>
+                    </label>
+                  );
+                })}
               </div>
             </div>
           </div>
