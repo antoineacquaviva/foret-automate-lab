@@ -1,5 +1,8 @@
 {
   "name": "Forêt Automate Lab — Banc d'Essai Monte-Carlo",
   "description": "Simulateur Monte-Carlo haute performance pour explorer, calibrer et départager les 2 916 variantes cartésiennes de l'automate Défenseurs de la Forêt.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

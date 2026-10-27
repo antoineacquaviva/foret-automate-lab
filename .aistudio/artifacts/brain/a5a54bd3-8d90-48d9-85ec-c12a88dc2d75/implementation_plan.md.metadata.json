@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan d'implémentation complet de foret-automate-lab v2 : Architecture 3 niveaux (VM 18 capteurs / 9 verbes, DSL YAML/JSON $sweep, Génome 447 int32), 7 Bots Iso-Effort (B0..B4), notation Théorie des Jeux Empirique (M1..M4 avec SNR, Kendall tau, divergence Jensen-Shannon, entropie de Shannon, malus anti-martingale non plafonné), exploration hybride (Grille Successive Halving 3 étages + NSGA-II / MAP-Elites 800 niches), interface Web 4 vues avec Traducteur en Règle de Jeu Humaine et générateur de bundle Python/Numba pour VM Oracle 16 vCPUs.",
-  "updatedAt":  "2026-10-27T09:13:08.144459990Z",
+  "summary":  "Plan de recentrage de Forêt Automate Lab v2 autour des 2 modes principaux (Mode 1 : Exploration Génétique Maximale vers Familles Niveau 2 ; Mode 2 : Test par Produit Cartésien Intégral d'une Famille YAML Niveau 2 vers Instances Niveau 3), avec clés de compréhension pédagogiques pour chaque paramètre, Bilan IA Gemini adapté à chaque mode, et Onglet/Document statique de spécification YAML Niveau 2 à joindre aux conversations Gemini externes.",
+  "updatedAt":  "2026-10-27T14:17:26.807819614Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
