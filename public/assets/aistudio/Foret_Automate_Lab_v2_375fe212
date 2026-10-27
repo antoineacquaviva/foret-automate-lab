@@ -1,0 +1,491 @@
+﻿Python
+import numpy as np
+
+# 1. Genome size calculation (Level 3 flat int32 vector)
+# Arena & Global header:
+# - L_cells (1)
+# - T_turns (1)
+# - dice_mode (1)
+# - end_of_track_mode (1)
+# - break_rule_id (1), break_penalty_id (1)
+# - momentum_rule_id (1)
+# - doubles_rule_id (1)
+# - scoring_mode_id (1), regen_max_per_cell (1)
+# Total Header = 10 ints
+
+# Topologies & Biomes:
+# Up to J_max = 6 tracks, L_max = 8 cells:
+# - init_cells[6, 8] = 48 ints (if symmetric across tracks, 8 ints; let's allow per-biome profile up to 4 profiles * 8 = 32 ints, or 8 ints base + biome_mode + obstacle_mask[8] + cell_weights[8] = 25 ints)
+# Let's count precisely:
+# - cell_cap[8] (8)
+# - cell_weights[8] (8)
+# - obstacle_mask[8] (8)
+# - biome_asymmetry_mode (1)
+# Total Arena = 25 ints
+
+# Tactics: N_max = 6 tactics, M_max = 4 slots per tactic
+# Per tactic header: machine_type (1), wave_mode (1), sort_criterion (1), fallback_mode (1) = 4 ints
+# Per slot (12 fields):
+#   cond1_sensor, cond1_op, cond1_val,
+#   logic_op (NONE/AND/OR),
+#   cond2_sensor, cond2_op, cond2_val,
+#   act_true_verb, act_true_qty, act_true_offset,
+#   act_false_verb, act_false_qty, act_false_offset,
+#   parry_mode, parry_cost = 15 ints
+# So 1 tactic = 4 + 4 * 15 = 64 ints
+# 6 tactics = 6 * 64 = 384 ints
+
+# Learning Track (11 cells + rules):
+# - init_track[11] (11)
+# - init_tile_side[11] (11) # for recto-verso flip
+# - eval_trigger_mode (1), threshold_val (1), shift_step_pos (1), shift_step_neg (1), on_cell_cleared_rule (1), geom_move_mode (1) = 6 ints
+# Total Learning = 28 ints
+
+total_genome_ints = 10 + 25 + 384 + 28
+genome_bytes = total_genome_ints * 4
+print(f"Total genome ints: {total_genome_ints} int32 ({genome_bytes} bytes)")
+
+# 2. Multi-fidelity Successive Halving budget calculation
+# Full eval without multi-fidelity: 1000 games * 7 bots * 4 player counts * 3 effort rates = 84,000 games per variant
+games_per_var_full = 1000 * 7 * 4 * 3
+# With 3-rung Successive Halving (Rung 1: 100% of pop, 80 games * 4 bots * 1 table * 1 effort = 320 games;
+# Rung 2: top 25% of pop, 400 games * 7 bots * 2 tables * 2 efforts = 11,200 games;
+# Rung 3: top 5% of pop, 1000 games * 7 bots * 4 tables * 3 efforts = 84,000 games)
+rung1_games = 80 * 4 * 1 * 1
+rung2_games = 400 * 7 * 2 * 2
+rung3_games = 1000 * 7 * 4 * 3
+avg_games_per_var_sh = 1.0 * rung1_games + 0.25 * rung2_games + 0.05 * rung3_games
+speedup_factor = games_per_var_full / avg_games_per_var_sh
+print(f"Full games/var: {games_per_var_full:,} | Avg SH games/var: {avg_games_per_var_sh:,.0f} | Speedup: {speedup_factor:.2f}x")
+
+# 3. Shannon Entropy max for 3 states (Arbres, Souches redressées, Terrassés)
+h_max = np.log2(3)
+# Example for balanced target (65% trees, 15% regenerated stumps, 20% terraced)
+p = np.array([0.65, 0.15, 0.20])
+h_target = -np.sum(p * np.log2(p))
+print(f"H_max (3 states): {h_max:.4f} bits | H_target (65/15/20): {h_target:.4f} bits ({h_target/h_max*100:.1f}% of max)")
+
+# 4. MAP-Elites grid size: e.g., 10 x 10 x 8 = 800 niches
+niches = 10 * 10 * 8
+print(f"MAP-Elites archive size: {niches} niches")
+
+
+Résultat du code
+Total genome ints: 447 int32 (1788 bytes)
+Full games/var: 84,000 | Avg SH games/var: 7,320 | Speedup: 11.48x
+H_max (3 states): 1.5850 bits | H_target (65/15/20): 1.2789 bits (80.7% of max)
+MAP-Elites archive size: 800 niches
+
+
+Spécification Fonctionnelle et Technique Détaillée — foret-automate-lab v2
+Ce document constitue la spécification de référence pour la refonte de la plateforme de simulation, d'évaluation et d'exploration génétique d'automates du jeu coopératif Les Défenseurs de la Forêt (3 à 6 joueurs). Il couvre l'architecture en 3 niveaux d'abstraction, la machine virtuelle compilée haute performance, le banc de Bots autonomes, le système de notation par Théorie des Jeux Empirique, le moteur évolutionnaire hybride Quality-Diversity, et l'interface Web de pilotage.
+1. Architecture Globale en 3 Niveaux d'Abstraction
+Pour découpler le code source du simulateur de la logique spécifique des automates testés, le système sépare strictement trois niveaux :
+
+
+Niveau
+	Nom
+	Rôle & Responsabilité
+	Représentation Technique
+	Niveau 1
+	Méta-Modèle (Machine Virtuelle / Contrat Abstrait)
+	Définit la physique immuable du plateau, les capteurs d'état, les verbes d'action primitifs, les portes d'interception (parades) et le compteur de charge cognitive/physique.
+	Code compilé en dur (Numba @njit) dans src/vm_engine.py.
+	Niveau 2
+	Famille d'Automates (Modèle Déclaratif Paramétré)
+	Spécifie une classe d'automates (nombre de tactiques, séquences conditionnelles, lois d'apprentissage et de score) en laissant des variables ouvertes ($PARAM ou listes de choix) pour les variantes.
+	Fichier déclaratif YAML / JSON validé par schéma Pydantic (src/dsl_compiler.py).
+	Niveau 3
+	Instance d'Automate (Variante Concrète / Génome)
+	Automate 100 % déterministe où chaque choix de règle et paramètre numérique est fixé. Sert d'unité d'évaluation Monte-Carlo et d'individu pour l'algorithme génétique.
+	Vecteur plat de 447 entiers int32 (1 788 octets), aligné en mémoire cache CPU.
+	2. Spécification du Bloc 1 — Le Méta-Modèle Générique (Niveau 1)
+2.1. Invariants Topologiques et État Physique de l'Arène
+L'arène modélise  couloirs unidirectionnels strictement indépendants (aucune interaction inter-couloirs) de longueur active  cases ( pour la Lisière à  pour le Sanctuaire).
+1. Matrice des Emplacements et Biomes Asymétriques :
+   * Chaque case  possède une capacité initiale  permettant de définir soit un profil identique pour tous les joueurs, soit des Biomes asymétriques par couloir (ex. Clairière-Jungle [1,1,2,4,4] vs Mur Végétal [4,3,2,2,1]) à somme d'arbres constante.
+   * Chaque emplacement traverse 3 états : Arbre debout ()  Souche ()  Zone Terrassée ().
+   2. Vecteur de Pondération Spatiale (cell_weights) :
+   * Chaque case  porte une valeur unitaire en points  (ex. uniforme [1,1,1,1,1] ou progressif [1,2,3,4,5]).
+      3. Masque d'Obstacles Naturels (obstacle_mask) :
+      * Chaque frontière entre la case  et  peut comporter un obstacle (0 = libre, 1 = Rivière/Ravine nécessitant 2 impulsions d'avancée, 2 = Pont logistique infranchissable par l'Abatteuse tant que le Bulldozer ne l'a pas rejointe en ).
+2.2. État Dynamique du Tandem de Machines
+Sur chaque couloir  évoluent deux machines : l'indice m = 0 (Abatteuse) et l'indice m = 1 (Bulldozer / Terrassier). Chaque machine  est caractérisée par 4 registres d'état :
+         * Pos[j, m]  : Indice de case actuelle, soumis à l'invariant physique strict  (tant que l'Abatteuse est en marche Aller).
+         * Dir[j, m]  : Sens de marche (+1 = Aller vers le Sanctuaire, -1 = Retour vers la Lisière après rebond).
+         * Role[j, m]  : Cible principale de la machine (permettant à une Abatteuse de se retourner en mode Bulldozer lorsqu'elle rebondit en bout de piste).
+         * Status[j, m]  : État mécanique et cinétique :
+            * -1 (Cassée / En panne) : La machine a subi une avarie ; à sa prochaine activation, elle exécute la règle de réparation When_Broken_Rule au lieu de sa séquence normale.
+            * 0 (Normale) : Régime standard.
+            * +1 (Lancée / Plein régime) : La machine bénéficie d'un élan mécanique acquis lors d'un tour précédent non paré.
+2.3. Dictionnaire des Capteurs (Sensors) du Niveau 1
+Chaque condition d'un Slot d'action peut lire l'un des 18 capteurs entiers suivants (comparés à un seuil via ==, !=, <, <=, >, >=) :
+
+
+ID
+	Code Capteur
+	Description de la valeur retournée
+	Coût Cognitif Statique
+	0
+	ALWAYS
+	Toujours vrai (condition inconditionnelle)
+	0.0 op
+	1
+	TREES_CURR
+	Nombre d'Arbres debout sur la case de la machine ()
+	+0.25 op
+	2
+	STUMPS_CURR
+	Nombre de Souches sur la case de la machine ()
+	+0.25 op
+	3
+	TERRACED_CURR
+	Nombre d'emplacements Terrassés sur la case ()
+	+0.25 op
+	4
+	TARGETS_CURR
+	Nombre de cibles correspondant au Role actif de la machine ( ou )
+	+0.2 op
+	5
+	IS_MONOCHROME_GREEN
+	1 si  et  et  (case intacte), sinon 0
+	+0.3 op
+	6
+	IS_MONOCHROME_BROWN
+	1 si  et  (case 100 % souches), sinon 0
+	+0.3 op
+	7
+	WAS_INTACT_TURN_START
+	1 si la case était monochrome au début du tour (avant le Slot 1), sinon 0
+	+0.4 op
+	8
+	POS_MACHINE
+	Position actuelle  de la machine
+	+0.2 op
+	9
+	IS_AT_END_OF_TRACK
+	1 si la machine est sur la dernière case dans son sens de marche (Dir), sinon 0
+	+0.1 op
+	10
+	TANDEM_GAP
+	Écart de cases  entre l'Abatteuse et le Bulldozer
+	+0.3 op
+	11
+	IS_BLOCKED_BY_OBSTACLE
+	1 si la frontière devant la machine comporte un obstacle actif non franchi
+	+0.3 op
+	12
+	MACHINE_STATUS
+	Statut mécanique de la machine (-1 Cassée, 0 Normale, +1 Lancée)
+	+0.2 op
+	13
+	PREV_SLOTS_SUCCEEDED
+	Nombre de Slots précédents réussis par cette machine durant ce tour
+	+0.3 op
+	14
+	MOVED_THIS_TURN
+	1 si la machine a changé de case durant ce tour, sinon 0
+	+0.2 op
+	15
+	PARRIED_THIS_TURN
+	Nombre de parades subies par cette machine durant ce tour
+	+0.2 op
+	16
+	IS_DICE_DOUBLE
+	1 si les deux dés du tirage 2D6 sont identiques (), sinon 0
+	+0.1 op
+	17
+	DICE_SUM_IN_CENTER
+	1 si la somme 2D6 appartient au cœur probabiliste , sinon 0
+	+0.2 op
+	2.4. Dictionnaire des Verbes d'Action Primitifs (Verbs)
+Chaque branche (Si Vrai / Si Faux) d'un Slot exécute un triplet (Verb_ID, Quantity, Offset) où Quantity  et Offset  :
+            1. NONE (0) : Patinage à vide (incrémente le compteur stalls si c'était l'action primaire attendue).
+            2. CUT(qty, offset) (1) : Convertit  Arbres en Souches.
+            3. BULLDOZE(qty, offset) (2) : Convertit  Souches en Zones Terrassées.
+            4. ERODE(qty, offset) (3) : Détruit directement  Arbres en Zones Terrassées (sans créer de Souche).
+            5. ADVANCE(steps) (4) : Déplace la machine de steps cases dans sa direction Dir[j,m], sous réserve de l'invariant  et des obstacles. Si la machine est en bout de piste, applique le mode end_of_track_mode :
+               * STOP : Échoue (déclenche l'action de repli Si Faux du Slot, permettant par exemple de convertir automatiquement [Avancer] en [Couper] au fond du couloir).
+               * BOUNCE : Inverse Dir[j,m] = -Dir[j,m] et avance en sens inverse.
+               * BOUNCE_AND_FLIP_ROLE : Inverse Dir[j,m] et bascule Role[j,m] de ROLE_CUT vers ROLE_BULLDOZE.
+               * LOOP_TO_START : Ramène la machine sur la première case non vide depuis la Lisière ().
+                  6. RETREAT(steps) (5) : Fait reculer la machine de steps cases vers la Lisière.
+                  7. CALL_PARTNER(steps) (6) : Fait avancer l'autre machine du même couloir de steps cases vers la machine active.
+                  8. SET_STATUS(val) (7) : Force l'état mécanique de la machine à -1 (Cassée), 0 (Normale) ou +1 (Lancée).
+                  9. SHIFT_TRACK(delta) (8) : Déplace immédiatement la tuile active de delta cases vers le centre (7) sur la piste 2D6.
+2.5. Portes d'Interception (Parades), Élan et Casse Mécanique
+Avant l'exécution d'un Verbe actif (CUT, BULLDOZE, ERODE, ADVANCE), le moteur ouvre une porte d'interception correspondant à la nature du verbe (PARRY_CUT, PARRY_BULLDOZE, PARRY_ADVANCE) :
+                  * Effet de Parade sur le Slot (parry_mode) :
+                  * UNPARRYABLE (0) : L'action ne peut pas être parée.
+                  * CANCEL_SLOT_ONLY (1) : La parade annule uniquement ce Slot ; la machine passe au Slot suivant.
+                  * CANCEL_REMAINING_TACTIC (2) : La parade brise l'élan de la machine et annule tous ses Slots restants pour ce tour (indispensable pour que bloquer [Avancer] dans [Avancer -> Couper] fasse perdre la coupe du tour).
+                  * DOWNGRADE_QTY_BY_1 (3) : Une parade réduit la quantité (qty) de 1 unité (il faut 2 parades pour bloquer totalement un CUT(2)).
+                  * Loi de Casse (break_rule) et d'Élan (momentum_rule) :
+                  * Déclenchement de Casse : Paramétrable parmi NEVER, ON_2_PARRIES_IN_TURN (2 parades subies sur le même tour), ON_PARRY_DURING_DOUBLE (1 parade subie lors d'un double aux dés), ou ON_PARRY_WHEN_CELL_EMPTY.
+                  * Effet de la Casse (break_penalty) : SKIP_NEXT_SLOT (perd le Slot 1 au prochain tour), SKIP_FULL_TURN (passe entièrement sa prochaine activation pour se réparer), RETREAT_1_AND_SKIP (recule d'1 case), ou RESET_TO_CELL_0 (renvoyée en Lisière).
+                  * Acquisition/Perte d'Élan : Si momentum_rule == ACTIVE, une machine qui termine son tour avec  action réussie et  parade subie passe à Status = +1 (gagne +1 en quantité sur son Slot 1 au tour suivant). Dès qu'elle subit 1 parade, son statut retombe immédiatement à 0.
+2.6. Moteur d'Apprentissage de la Piste 2D6 (11 Cases)
+À la fin de chaque tour, la piste probabiliste de 11 cases (indices 0 à 10 pour les sommes 2 à 12, le centre étant l'indice 5 = somme 7) évolue selon trois paramètres :
+                     1. Déclencheur d'apprentissage (eval_trigger_mode) :
+                     * MAJORITY_UNPARRIED : Succès si au moins $\lceil J/2 \rceil$ pistes n'ont subi aucune parade ce tour-ci.
+                     * RATIO_SUCCESS_VS_FAIL : Succès si turn_successes >= turn_failures.
+                     * NET_DIFFERENCE : Amplitude de déplacement égale à turn_successes - turn_failures.
+                     * ON_CELL_CLEARED_EVENT : Déclenche une promotion vers le 7 d'une tuile Bulldozer chaque fois qu'une case perd son dernier Arbre ( passe de  à ).
+                        2. Opérateur géométrique sur la piste (geom_move_mode) :
+                        * SWAP_TOWARD_7_OR_EDGES : Échange la tuile active avec sa voisine en direction de l'indice 5 (si succès) ou des bords 0/10 (si échec).
+                        * FLIP_RECTO_VERSO : Au lieu de glisser (ou lorsqu'elle est refoulée après un échec), la tuile active se retourne sur place pour présenter sa face opposée (Abatteuse  Bulldozer), réduisant la manipulation physique à 1 seul retournement.
+2.7. Décompte de Fin de Partie (Système Piste 3 et Généralisations)
+À l'issue du tour final , le score de chaque couloir  est calculé en deux temps (100 % en nombres entiers d'Arbres sauvés, sans nombres décimaux) :
+                           1. Phase de Redressement Final des Souches (regen_mode) :
+                           * NONE (0) : Aucune souche n'est redressée (Arbres_Seuls).
+                           * PISTE3_1_PER_CELL_WITH_STUMP (1) : Sur chaque case  où , exactement  Souche est redressée en Arbre ().
+                           * PISTE3_INTACT_SOIL_ONLY (2) : Sur chaque case  où  ET qui n'a subi aucun terrassement (),  Souche est redressée en Arbre ().
+                           * PISTE3_UP_TO_K_IF_NO_BULLDOZE (3) : Redresse jusqu'à  souches si le Bulldozer n'est jamais entré sur la case .
+                              2. Phase de Sommation Pondérée :
+$$\text{Score}_{\text{brut}} = \sum_{j=0}^{J-1} \sum_{c=0}^{L-1} W_c \cdot A'_{j,c} \quad \text{et} \quad \text{Score}_{\%} = \frac{100 \times \text{Score}_{\text{brut}}}{J \times \sum_{c=0}^{L-1} W_c \cdot N_{j,c}}$$
+3. Spécification du Bloc 2 — Le Langage Déclaratif de Famille (Niveau 2) et le Génome (Niveau 3)
+3.1. Structure du Fichier de Description de Famille (YAML / JSON — Niveau 2)
+Toute clé du fichier de Niveau 2 accepte soit un scalaire (paramètre figé pour toute la famille), soit un objet {"$sweep": [...]} (liste de modalités à explorer en produit cartésien ou par mutation génétique).
+
+
+
+
+
+
+YAML
+family_id: "Famille_4Tactiques_Enlisement_Piste3"
+description: "4 tactiques sans tri de pistes, enlisement sur case vide, redressement Piste 3"
+
+arena:
+ turns: { "$sweep": [14, 16, 20] }
+ dice_mode: "GLOBAL_2D6"          # ou {"$sweep": ["GLOBAL_2D6", "PER_TRACK_2D6"]}
+ biomes:
+   mode: { "$sweep": ["SYMMETRIC_5c_12a", "ASYMMETRIC_BIOMES_12a"] }
+   profiles:
+     SYMMETRIC_5c_12a: [[2, 2, 2, 3, 3]]
+     ASYMMETRIC_BIOMES_12a: [[1, 1, 2, 4, 4], [4, 3, 2, 2, 1], [2, 3, 2, 3, 2], [2, 2, 4, 2, 2]]
+ cell_weights: { "$sweep": [[1, 1, 1, 1, 1], [1, 1, 2, 2, 3]] }
+ obstacles: { "$sweep": [[0, 0, 0, 0, 0], [0, 0, 2, 0, 0]] } # 2 = Pont logistique en case 3
+ end_of_track_mode: { "$sweep": ["STOP", "BOUNCE", "BOUNCE_AND_FLIP_ROLE"] }
+
+machines_physics:
+ break_rule: { "$sweep": ["NEVER", "ON_2_PARRIES_IN_TURN", "ON_PARRY_DURING_DOUBLE"] }
+ break_penalty: { "$sweep": ["SKIP_NEXT_SLOT", "SKIP_FULL_TURN", "RETREAT_1_AND_SKIP"] }
+ momentum_rule: { "$sweep": ["NONE", "ACTIVE"] }
+
+tactics:
+ - id: "C1_Coupe_Intensive"
+   machine: "ABATTEUSE"
+   wave_mode: "ALL_TRACKS"
+   slots:
+     - cond1: ["TARGETS_CURR", ">=", 1]
+       if_true: ["CUT", 1, 0]
+       if_false: ["NONE", 0, 0]
+       parry_mode: "CANCEL_SLOT_ONLY"
+     - cond1: ["TARGETS_CURR", ">=", 1]
+       if_true: ["CUT", 1, 0]
+       if_false: ["NONE", 0, 0]
+       parry_mode: "CANCEL_SLOT_ONLY"
+     # Slot 3 optionnel : Effet Domino en c+1 si la case vient de tomber à 0 arbre
+     - cond1: ["PREV_SLOTS_SUCCEEDED", ">=", 1]
+       logic: "AND"
+       cond2: ["TARGETS_CURR", "==", 0]
+       if_true: { "$sweep": [["NONE", 0, 0], ["CUT", 1, +1]] }
+       if_false: ["NONE", 0, 0]
+       parry_mode: "CANCEL_SLOT_ONLY"
+
+ - id: "C2_Avancer_Couper"
+   machine: "ABATTEUSE"
+   wave_mode: "ALL_TRACKS"
+   slots:
+     - cond1: ["TARGETS_CURR", "<=", { "$sweep": [0, 1, 99] }]
+       if_true: ["ADVANCE", 1, 0]
+       if_false: { "$sweep": [["CUT", 1, 0], ["NONE", 0, 0]] }
+       parry_mode: { "$sweep": ["CANCEL_REMAINING_TACTIC", "CANCEL_SLOT_ONLY"] }
+     - cond1: ["TARGETS_CURR", ">=", 1]
+       if_true: ["CUT", 1, 0]
+       if_false: ["NONE", 0, 0]
+       parry_mode: "CANCEL_SLOT_ONLY"
+
+ - id: "B1_Terrassement_Intensif"
+   machine: "BULLDOZER"
+   wave_mode: "ALL_TRACKS"
+   slots:
+     - cond1: ["TARGETS_CURR", ">=", 1]
+       if_true: ["BULLDOZE", 1, 0]
+       if_false: ["NONE", 0, 0]
+       parry_mode: "CANCEL_SLOT_ONLY"
+     - cond1: ["TARGETS_CURR", ">=", 1]
+       if_true: ["BULLDOZE", 1, 0]
+       if_false: ["NONE", 0, 0]
+       parry_mode: "CANCEL_SLOT_ONLY"
+
+ - id: "B2_Avancer_Terrasser"
+   machine: "BULLDOZER"
+   wave_mode: "ALL_TRACKS"
+   slots:
+     - cond1: ["TARGETS_CURR", "<=", { "$sweep": [0, 1] }]
+       if_true: ["ADVANCE", 1, 0]
+       if_false: ["BULLDOZE", 1, 0]
+       parry_mode: "CANCEL_REMAINING_TACTIC"
+     - cond1: ["TARGETS_CURR", ">=", 1]
+       if_true: ["BULLDOZE", 1, 0]
+       if_false: ["NONE", 0, 0]
+       parry_mode: "CANCEL_SLOT_ONLY"
+
+learning_track:
+ initial_layout: { "$sweep": ["6C_5B_CENTRE_COUPE", "6C_5B_ALTERNE"] }
+ eval_trigger_mode: { "$sweep": ["MAJORITY_UNPARRIED", "RATIO_SUCCESS_VS_FAIL", "ON_CELL_CLEARED_EVENT"] }
+ geom_move_mode: { "$sweep": ["SWAP_TOWARD_7_OR_EDGES", "FLIP_RECTO_VERSO"] }
+
+scoring:
+ regen_mode: { "$sweep": ["PISTE3_1_PER_CELL_WITH_STUMP", "PISTE3_INTACT_SOIL_ONLY"] }
+
+3.2. Encodage Binaire du Génome de Niveau 3 (447 entiers int32)
+Chaque instance concrète est compilée en un tableau NumPy genome = np.zeros(447, dtype=np.int32) structuré en 4 segments contigus :
+                                 * Segment [0..9] (10 entiers) — En-tête Global : L_cells, T_turns, dice_mode, end_of_track_mode, break_rule, break_penalty, momentum_rule, doubles_rule, regen_mode, regen_max.
+                                 * Segment [10..34] (25 entiers) — Arène & Topologie : Capacités cell_cap[8], pondérations cell_weights[8], obstacles obstacle_mask[8], biome_asymmetry_mode.
+                                 * Segment [35..418] (384 entiers) — Table des 6 Tactiques  4 Slots : Chaque tactique occupe 64 entiers (4 entiers d'en-tête +  entiers décrivant les 2 conditions, l'opérateur logique, le verbe Si Vrai, le verbe Si Faux, le mode et le coût de parade).
+                                 * Segment [419..446] (28 entiers) — Piste d'Apprentissage 2D6 : init_track[11], init_tile_verso[11], et les 6 paramètres de déclenchement et de glissement/retournement.
+4. Spécification du Bloc 3 — Le Banc de Bots Joueurs Autonomes
+Chaque couloir  est piloté de manière 100 % isolée par un Bot doté d'un budget total de parades  régulé dynamiquement par le ratio  afin de garantir l'invariant Iso-Effort entre tous les Bots ( sur la partie).
+4.1. Les 7 Profils de Bots (Échelle de Référence )
+                                    1. B0_Passif (Niveau 0 — Étalon de Férocité Brute) :
+                                    * Budget forcé à . Mesure la vitesse de destruction intrinsèque de l'automate, le tour d'arrivée en bout de piste et le taux de patinage naturel hors intervention humaine.
+                                       2. B1_Aveugle (Niveau 1 — Joueur Débutant Aléatoire) :
+                                       * Applique la probabilité de base  uniformément sur toute porte d'interception valide (PARRY_CUT, PARRY_BULLDOZE, PARRY_ADVANCE).
+                                          3. B2a_Mono_Anti_Coupe, B2b_Mono_Anti_Bull, B2c_Mono_Anti_Avance (Niveau 2 — Les 3 Sondes Anti-Martingales) :
+                                          * Concentrent $100\%$ de leur priorité de parade sur un seul verbe : uniquement CUT/ERODE pour B2a, uniquement BULLDOZE pour B2b, et uniquement ADVANCE pour B2c.
+                                          4. B3_Tacticien_Couloir (Niveau 3 — Lecture Tactique Locale par Fonction d'Utilité) :
+Lorsqu'une porte d'interception s'ouvre sur sa piste, B3 calcule le Gain Marginal Espéré en Arbres Finaux  en additionnant 5 composantes :
+
+
+                                          *                                           *  : Pour un CUT(qty, offset), vaut  si la perte excède le quota redressable en fin de partie (ex. dès le 2e arbre coupé sur une case en mode PISTE3_1_PER_CELL, ou dès le 1er arbre si le Bulldozer est déjà actif sur la case).
+                                          *  : Pour un BULLDOZE, vaut  s'il s'agit de la souche critique qui porte l'Arbre redressé de fin de partie (la dernière souche de la case en mode 1_PER_CELL, ou la toute première souche en mode INTACT_SOIL_ONLY), et  pour une souche surnuméraire non critique !
+                                          *  : Pour un ADVANCE, vaut  si la case actuelle  est vide ( cible) et que bloquer l'avancée condamne la machine à perdre son Slot 2 (CANCEL_REMAINING_TACTIC) ET à patiner lors des prochains tours [Agir + Agir]. Vaut également  si bloquer l'Abatteuse retient simultanément le Bulldozer derrière elle () ou devant un Pont logistique.
+                                          *  : Ajoute un bonus  si cette parade déclenche la Casse de la machine (ex. 2e parade du tour ou parade sur un Double) ou brise un statut Lancé (Status == +1).
+                                             * B3 déclenche sa parade en priorité haute dès que  (calibré dynamiquement sur ).
+                                                5. B4_Stratege_Complet (Niveau 4 — Lecture Locale + Contrôle Probabiliste 2D6) :
+                                                * Reprend l'évaluation exacte  de B3 et la multiplie par un Coefficient de Pression Stratégique  lié à la piste 2D6 :
+                                                   * Si la tuile tirée est sur le cœur probabiliste  (probabilité cumulée $16/36 = 44.4\%$),  pour forcer l'échec du tour et refouler la tuile vers les ailes (ou retourner sa face recto-verso).
+                                                   * Si la tuile tirée est sur les extrémités rares  ($6/36 = 16.7\%$),  (accepte d'encaisser un dégât non mortel sur un tirage rare pour économiser ses parades en vue du 6-7-8).
+5. Spécification du Bloc 4 — Le Système de Notation Scientifique (M1..M4)
+Pour évaluer des populations d'automates très hétérogènes sans biais mécanique, les 4 métriques normalisées sur  s'appuient sur la Théorie des Jeux Empirique et la Théorie de l'Information.
+5.1. M1_Maitrise — Gradient de Compétence & Ratio Signal-sur-Bruit (0 à 100)
+Un bon automate doit récompenser chaque palier d'intelligence des joueurs () tout en garantissant que cet écart n'est pas noyé dans le hasard des dés.
+Écart de Maîtrise Brut () :
+
+
+                                                      1. Ratio Signal-sur-Bruit de Décision () :
+
+
+                                                      2. 
+(Si , un joueur intelligent bat un joueur aveugle dans plus de $85\%$ des parties malgré l'aléatoire des 2D6).
+                                                      3. Corrélation de Monotonie de Kendall () : Mesure la proportion de paires ordonnées respectées dans la hiérarchie théorique  ().
+                                                      4. Formule M1_Maitrise :
+$$M_1 = \text{clip}_{[0, 100]}\Big( 4.0 \cdot \Delta_{\text{Skill}} + 15.0 \cdot \text{SNR} + 5.0 \cdot \max(0, \Delta_{\text{Piste}}) + 20.0 \cdot \max(0, \tau_K) \Big)$$
+5.2. M2_Adaptation — Plasticité Stratégique, Non-Stationnarité & Immunité aux Martingales (0 à 100)
+Pour remplacer l'ancienne mesure rigide et capter l'adaptabilité de n'importe quelle architecture d'automate, M2 combine trois mesures mathématiques universelles :
+                                                         1. Sous-score A — Contre-Adaptation de l'Automate face aux Bots () : Soit  la distribution de probabilité des actions effectivement exécutées par l'automate lorsqu'il affronte un Bot . Si l'automate est réellement adaptatif, lorsqu'il affronte B2a_Mono_Anti_Coupe (qui bloque les coupes), son moteur d'apprentissage doit déplacer son centre de gravité vers d'autres tactiques (Bulldozer ou Avancée) par rapport à un affrontement contre B2b_Mono_Anti_Bull. On mesure cette plasticité par la Divergence de Jensen-Shannon () entre le profil de l'automate face à B2a et son profil face à B2b :
+$$D_{JS}\big(P_{\text{act}}(B2a) \parallel P_{\text{act}}(B2b)\big) = \frac{1}{2} D_{KL}(P_{2a} \parallel M) + \frac{1}{2} D_{KL}(P_{2b} \parallel M) \quad \text{où } M = \frac{1}{2}(P_{2a} + P_{2b})$$
+Plus  est élevée (accompagnée d'une baisse du patinage au fil des tours), plus l'automate contourne activement le blocage du joueur.
+                                                         2. Sous-score B — Renouvellement Dramatique Temporel / Phased Gameplay () : La partie de  tours est découpée en 3 tiers (, , ). On calcule la distance de variation totale  sur la distribution des tactiques activées en 6-7-8. Cela récompense tout automate qui change de visage entre le début et la fin de la bataille (quelle que soit la nature exacte de ses tuiles).
+                                                         3. Sous-score C — Équilibre de Nash Empirique & Pénalité Rédhibitoire Anti-Martingale (, avec malus non plafonné) : Soit  le score du meilleur Bot monomaniaque et  le score du meilleur Bot intelligent.
+Condition de Dominance Stricte : Pour que les 3 états (Arbre, Souche, Terrassé) et les 3 parades aient une valeur vitale, il faut impérativement que chaque stratégie monomaniaque soit battue par le jeu intelligent :
+
+
+                                                            *                                                             * Si  (les Bots intelligents battent tous les monomaniaques), l'automate reçoit un bonus proportionnel à cette marge : .
+                                                            * Si  (un Bot monomaniaque comme Anti-Coupe bat ou égale B3/B4), aucun plafonnement à 100 n'est possible : un malus quadratique lourd  est appliqué directement après la somme de , interdisant à toute variante biaisée d'atteindre le haut du classement.
+5.3. M3_Tension — Fenêtre d'Harmonie, Entropie de Shannon des 3 États & Pacing (0 à 100)
+                                                               1. Ciblage de la Fenêtre d'Harmonie Forestière () : Le score moyen  à effort moyen ($\bar{P} = 50\%$) doit se situer dans la zone gratifiante $[60\%, 80\%]$ d'Arbres sauvés (centre idéal à $70\%$), sans jamais tomber à $0\%$ ni plafonner à $100\%$.
+Entropie de Shannon des 3 États Finaux () : À la fin de la partie (juste avant le redressement final), on mesure la proportion d'emplacements dans les 3 états :  (Arbres debout),  (Souches),  (Zones Terrassées) avec . L'équilibre d'existence des 3 états est mesuré par l'Entropie de Shannon normalisée (avec ) :
+
+
+                                                                  2. 
+Une entropie proche de la cible idéale (, correspondant par exemple à $65\%$ Arbres, $15\%$ Souches, $20\%$ Terrassés) garantit que ni les Souches ni les Zones Terrassées ne sont anecdotiques sur le plateau.
+                                                                  3. Continuité de la Pression / Pacing () : Pénalise le patinage excessif chez B0_Passif (un automate qui patine à plus de $10\%$ alors même que le joueur ne fait aucune parade est mal conçu mécaniquement) et vérifie que des dégâts ont lieu dans chacun des 3 tiers de la partie.
+5.4. M4_Simplicite — Charge Physique et Complexité Syntaxique sur Table (0 à 100)
+Pour garantir que le jeu reste fluide sans ordinateur, M4 additionne :
+                                                                     1. La Charge Physique Dynamique ( / tour) : Nombre moyen de manipulations de pions, d'avancées de machines et de glissements/retournements de tuiles par tour.
+                                                                     2. La Charge Cognitive Dynamique ( / tour) : Nombre de vérifications de conditions exécutées à chaque tour.
+                                                                     3. La Complexité Syntaxique Statique de la Règle () : Calculée directement sur le génome de l'automate (somme des coûts cognitifs des capteurs utilisés dans les Slots actifs + pénalité si les 4 tactiques utilisent des seuils hétérogènes difficiles à mémoriser).
+$$M_4 = \text{clip}_{[0, 100]}\Big( 100.0 - 12.0 \cdot \max(0, C_{\text{cog}} - 1.0) - 4.5 \cdot \max(0, M_{\text{phys}} - 2.5) - 3.0 \cdot C_{\text{règle}} \Big)$$
+6. Spécification du Bloc 5 — Le Moteur d'Exploration Hybride (Grille & Algorithme Génétique Quality-Diversity)
+L'outil propose deux moteurs d'exploration complémentaires : le Balayage Cartésien (quand le nombre de combinaisons du Niveau 2 est ) et le Moteur Évolutionnaire Hybride NSGA-II + MAP-Elites (pour brasser des espaces de millions d'automates possibles et inventer des mécaniques).
+6.1. Architecture de l'Algorithme Évolutionnaire (NSGA-II + MAP-Elites)
+Pour éviter le piège classique des algorithmes génétiques qui convergent vers une seule famille d'automates clones, le moteur maintient simultanément :
+                                                                        1. Une Population Active de taille  (ex.  individus par génération) évoluant selon le tri par fronts de Pareto non-dominés en 4 dimensions  et la distance de surpeuplement (Crowding Distance) de NSGA-II.
+                                                                        2. Une Archive Comportementale Illuminée (MAP-Elites Grid de  niches écologiques) : Chaque automate évalué est projeté dans une cellule 3D selon son Descripteur Comportemental (Phénotype) :
+                                                                           * Axe X (10 intervalles) : Complexité sur table (), du jeu ultra-minimaliste au jeu expert.
+                                                                           * Axe Y (10 intervalles) : Profil de Pression (Ratio ).
+                                                                           * Axe Z (8 intervalles) : Cinétique de Mouvement (Nombre moyen d'avancées et de rebonds par piste).
+                                                                           * Règle d'archivage MAP-Elites : Une cellule de la grille ne conserve que le meilleur automate trouvé pour ce style de jeu précis. Lors de la reproduction, $50\%$ des parents sont tirés du Front de Pareto NSGA-II et $50\%$ sont tirés uniformément parmi les niches non vides de l'archive MAP-Elites, forçant un brassage permanent de styles très différents.
+6.2. Opérateurs de Croisement et de Mutation Créative
+                                                                              * Croisement Structurel par Bloc Fonctionnel (Block-Crossover, ) : Deux parents  et  échangent des blocs cohérents de leur génome : soit la paire de tactiques Abatteuse de  avec la paire de tactiques Bulldozer de , soit le moteur d'apprentissage 2D6 de  avec les lois physiques (Casse/Élan/Piste 3) de .
+                                                                              * Mutations Paramétriques de Calibrage ( par gène numérique) : Incrémente ou décrémente un seuil (0 <-> 1), une durée de tours (14 <-> 16 <-> 20), un poids de case , ou la disposition initiale des tuiles 2D6.
+                                                                              * Mutations Structurelles / Créatives (inspirées de NEAT,  par individu) :
+                                                                                 * Greffe de Slot Conditionnel : Active un 3e Slot jusque-là inactif (NONE) en y injectant un effet Boost (ex. SI IS_MONOCHROME_GREEN == 1 ALORS CUT(1, 0)) ou un effet Domino à distance (SI TARGETS_CURR == 0 ALORS CUT(1, +1)).
+                                                                                 * Élagage d'Occam (Pruning Mutation) : Désactive un Slot conditionnel ou remplace une condition complexe par ALWAYS pour voir si l'automate conserve ses performances M1/M2 tout en bondissant sur M4 Simplicité !
+                                                                                 * Mutation de Mécanique Globale : Active/désactive une règle de Casse sur double aux dés, un obstacle Rivière, ou bascule l'apprentissage de SWAP vers FLIP_RECTO_VERSO.
+                                                                                 * Filtre d'Éligibilité Statique Pré-Simulation : Avant d'envoyer un génome muté au simulateur, un vérificateur rapide s'assure que l'automate possède au moins 1 verbe CUT, 1 verbe BULLDOZE et 1 verbe ADVANCE atteignables, éliminant instantanément les mutants mort-nés.
+7. Exploitation Haute Performance de la VM Oracle (8 OCPU / 16 vCPUs)
+Pour exploiter à $100\%$ les 16 threads matériels AMD EPYC de l'instance VM.Standard.E5.Flex (tout en conservant 2 threads réservés et os.nice(15) pour la réactivité du serveur Web et de l'OS), le moteur combine deux optimisations majeures :
+7.1. Noyau Batch Parallèle Numba (@njit(nogil=True, parallel=True, fastmath=True))
+                                                                                 * Tous les tableaux de travail (A, S, Pos, Dir, Role, Status, track) sont pré-alloués par thread worker hors de la boucle des parties (zéro allocation dynamique sur le tas).
+                                                                                 * Réduction de Variance par Nombres Aléatoires Communs (Common Random Numbers — CRN) : Pour une graine de base donnée, les 7 Bots (B0 à B4) affrontent exactement les mêmes séquences de tirages 2D6 _xorshift64star au tour . Cela divise par  la variance statistique sur les différences  et , permettant d'obtenir à  parties la précision qui en nécessiterait  avec des tirages indépendants.
+7.2. Entonnoir d'Évaluation Multi-Fidélité (Successive Halving à 3 Étages)
+Un automate complet évalué au niveau de précision maximal nécessite :
+
+
+$$1\,000\text{ parties} \times 7\text{ Bots} \times 4\text{ tailles de table } (3..6\text{J}) \times 3\text{ taux d'effort } (30\%, 50\%, 70\%) = 84\,000\text{ parties/variante}$$
+Pour multiplier par  la vitesse d'exploration sans perte de précision sur les meilleures variantes, chaque lot d'automates traverse un entonnoir à 3 paliers (Rungs) :
+
+
+Étage (Rung)
+	Population évaluée
+	Configuration du test
+	Parties / variante
+	Critère de promotion à l'étage suivant
+	Étage 1 (Tamis Rapide)
+	100 % des variantes
+	, Effort $50\%$, 4 Bots clés (B0, B1, B2a, B3)  parties
+	320 parties
+	Élimine les $75\%$ d'automates qui patinent, où B2a >= B3, ou hors fenêtre de survie $[35\%..92\%]$.
+	Étage 2 (Calibrage)
+	Top 25 % survivants
+	 & , Efforts $30\%$ & $50\%$, les 7 Bots (B0..B4)  parties
+	11 200 parties
+	Calcule les 4 métriques  et promeut le Top 5 % + tout le Front de Pareto 4D + les élites MAP-Elites.
+	Étage 3 (Certification Haute Précision)
+	Top 5 % & Front de Pareto
+	Toutes les tables (), tous les efforts ($30\%, 50\%, 70\%$), 7 Bots  parties
+	84 000 parties
+	Produit les statistiques définitives certifiées, les courbes tour par tour et le rapport final.
+	Bilan de performance : Le coût moyen tombe de 84 000 à 7 320 parties par variante évaluée (accélération de 11,48x), permettant d'évaluer 10 000 variantes d'automates en moins de 90 secondes sur les 14 workers de la VM Oracle.
+8. Spécification du Bloc 5bis — L'Interface Web & API de Pilotage
+L'application Web est structurée autour d'un backend FastAPI léger (servant une API REST + flux temps réel Server-Sent Events / SSE) et d'une interface monopage réactive en 4 vues :
+8.1. Vue 1 — Studio d'Automates (Niveau 2 : Éditeur & Constructeur Visuel)
+                                                                                    * Sélecteur de Modèles & Import/Export : Bibliothèque de familles d'automates pré-configurées (ex. 4 Tactiques Enlisement Piste 3, Famille avec Casse & Doubles, Exploration Totale Génétique), import par glisser-déposer de fichiers .yaml/.json et téléchargement.
+                                                                                    * Éditeur Hybride (Formulaire Structuré + Code YAML) :
+                                                                                    * Onglet Visuel : Permet d'ajouter/modifier les Tactiques, leurs Slots [Si Capteur -> Action sinon Repli], les règles de Casse/Élan et le mode de score Piste 3 via des listes déroulantes.
+                                                                                    * Onglet Code YAML : Éditeur texte synchronisé pour copier-coller directement une famille d'automates générée par IA.
+                                                                                    * Validateur Temps Réel : Affiche en bas de page le nombre exact de variantes générées par les balayages $sweep et le score de complexité statique  de chaque tactique.
+8.2. Vue 2 — Configurateur de Campagne & de Bots
+                                                                                       * Choix du Moteur d'Exploration :
+                                                                                       * Mode Grille Cartésienne Exhaustive (avec option d'activation de l'entonnoir Multi-Fidélité à 3 étages).
+                                                                                       * Mode Algorithme Génétique (NSGA-II + MAP-Elites) : Réglage de la taille de population , du nombre de générations , du taux de mutation créative et des bornes de complexité maximale autorisée ().
+                                                                                          * Paramétrage des Bots & Tables : Cases à cocher pour les Bots (B0 à B4), sélection des tailles de table ( joueurs) et des paliers d'effort ($\bar{P} \in [20\%..80\%]$).
+                                                                                          * Pondération Interactive des Objectifs : 4 curseurs normalisés pour  (recalculant d'ailleurs à la volée le classement d'une campagne déjà terminée sans relancer la simulation).
+8.3. Vue 3 — Console d'Exécution & Télémétrie VM en Direct
+                                                                                             * Contrôles d'Exécution : Boutons Lancer, Pause (Fin de lot), Reprendre depuis Checkpoint et Arrêter.
+                                                                                             * Indicateurs Temps Réel (flux SSE à 1 Hz) :
+                                                                                             * Barre de progression par Étage (Rung 1 / 2 / 3) ou par Génération génétique, vitesse instantanée en millions de parties/seconde, ETA, et jauge d'utilisation des 16 vCPUs et des 16 Go de RAM.
+                                                                                             * En mode Génétique : affichage en direct de la courbe de progression du Front de Pareto et du taux de remplissage de la grille MAP-Elites (nombre de niches écologiques découvertes sur 800).
+8.4. Vue 4 — Laboratoire d'Analyse des Résultats & Traducteur de Règles Humaines
+                                                                                             * Table Interactive du Classement & Front de Pareto 4D : Tri multi-colonnes, filtrage sur is_pareto_4d, et exploration visuelle de la carte de chaleur MAP-Elites (cliquer sur une case de la grille affiche le champion de ce style de jeu).
+                                                                                             * Visualiseur Graphique par Variante (3 Graphiques) :
+                                                                                             1. Profil de Réponse des 7 Bots (B0 à B4) : Graphique en barres mettant en évidence l'écart  pour vérifier visuellement l'absence totale de martingale.
+                                                                                             2. Courbe Temporelle Tour par Tour () : Évolution empilée des % Arbres, % Souches (dont Souches critiques Piste 3), % Zones Terrassées, et occupation du cœur 6-7-8 de la piste 2D6.
+                                                                                             3. Radar 4D  : Superposition de la variante sélectionnée avec le Top 3 de la campagne.
+                                                                                                * Le « Traducteur en Règle de Jeu Humaine » (Fonctionnalité clé pour le Game Design) : Lorsqu'un automate (notamment issu d'une mutation génétique) est sélectionné dans le tableau, un panneau dédié traduit automatiquement son génome de 447 entiers en une fiche de règles rédigée en français clair, prête à être imprimée pour un playtest physique sur table (décrivant la mise en place, l'effet exact des 4 tuiles, la règle de casse/enlisement et le décompte final Piste 3).
+                                                                                                * Exports Analytiques en 1 Clic : Téléchargement de campaign_report.md (enrichi de la traduction en français des règles du Top 5), variants_ranking.csv, map_elites_archive.csv, sensitivity_analysis.csv et export du génome de n'importe quelle variante sous forme de fichier .yaml de Niveau 2 autonome.

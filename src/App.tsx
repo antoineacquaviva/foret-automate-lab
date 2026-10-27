@@ -1,284 +1,592 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
-  Trees,
   Play,
+  Pause,
+  RotateCcw,
   Square,
   Download,
-  CheckCircle2,
-  Sliders,
-  BarChart3,
-  FileText,
-  Trophy,
-  Activity,
-  ShieldAlert,
-  Sparkles,
+  Upload,
+  Plus,
+  Trash2,
   Search,
+  Sliders,
+  FileText,
+  BookOpen,
+  Terminal,
+  Compass,
+  Layers,
 } from 'lucide-react';
 import {
-  generateVariants,
-  O1_MAP,
-  O2_MAP,
-  O3_MAP,
-  O4_MAP,
-  O5_MAP,
-  P1_MAP,
-  P2_MAP,
-  TOPOLOGIES,
-  TOPOLOGY_LENGTHS,
-  INITIAL_TRACKS,
-  variantToIntTuple,
-} from './sim/variants';
-import { ALL_DOCTRINES } from './sim/doctrines';
-import { simulateBatchKernel, simulateTurnByTurnProfile, TurnProfile } from './sim/engine';
+  SENSORS,
+  VERBS,
+  COMP_OPS,
+  PARRY_MODES,
+  END_OF_TRACK_MODES,
+  BREAK_RULES,
+  BREAK_PENALTIES,
+  MOMENTUM_RULES,
+  REGEN_MODES,
+  EVAL_TRIGGER_MODES,
+  GEOM_MOVE_MODES,
+  GENOME_SIZE,
+  GENOME_BYTES,
+} from './v2/genome';
 import {
-  EvaluatedVariant,
-  MetricsWeights,
-  evaluateSingleVariant,
-  flagParetoFront,
-} from './sim/metrics';
+  FamilySpecDSL,
+  PRELOADED_FAMILIES,
+  countFamilySweepVariants,
+  compileFamilyToGenomes,
+  translateGenomeToHumanRulebook,
+  exportGenomeToLevel2Yaml,
+  CompiledGenomeSpec,
+} from './v2/dsl_compiler';
 import {
-  computeSensitivityAnalysis,
-  generateMarkdownReport,
-  exportVariantsCsv,
-} from './sim/reporter';
+  ALL_BOTS_V2,
+  simulateTurnProfileV2,
+  TurnByTurnProfileV2,
+} from './v2/bots_and_vm';
+import {
+  WeightsV2,
+  EvaluatedAutomatonV2,
+  evaluateAutomatonScientific,
+  reweightAndRankPopulation,
+  breedOffspringGenome,
+} from './v2/metrics_and_qd';
+import {
+  exportVariantsRankingCsvV2,
+  exportMapElitesArchiveCsv,
+  computeSensitivityAnalysisV2,
+  exportSensitivityCsvV2,
+  generateFullCampaignReportV2,
+  generateOciPythonBundleScript,
+} from './v2/oci_exporter';
+import {
+  Radar4DChart,
+  BotsResponseChart,
+  MapElitesHeatmap,
+  TurnByTurnCurveChart,
+} from './v2/ChartsV2';
 
-interface UnitTestResult {
-  name: string;
-  passed: boolean;
-  detail: string;
+type ActiveView = 'studio' | 'config' | 'console' | 'lab';
+type ExplorationMode = 'grid_sh' | 'genetic_qd';
+
+interface TelemetryState {
+  phaseLabel: string;
+  currentRungOrGen: number;
+  maxRungOrGen: number;
+  doneInPhase: number;
+  totalInPhase: number;
+  totalGamesSimulated: number;
+  speedGamesPerSec: number;
+  elapsedSec: number;
+  rung1Count: number;
+  rung2Survivors: number;
+  rung3Certified: number;
+  nichesDiscovered: number;
+  generationHistory: Array<{ gen: number; bestScore: number; meanPareto: number; niches: number }>;
 }
 
-function runEngineUnitTests(): UnitTestResult[] {
-  const results: UnitTestResult[] = [];
-  const allVars = generateVariants();
-
-  // Test 1: 2916 Cartesian variants
-  results.push({
-    name: '1. Génération cartésienne complète (2 916 variantes)',
-    passed: allVars.length === 2916,
-    detail: `${allVars.length} variantes générées`,
-  });
-
-  // Test 2: 3-state conservation & Iso-effort budget
-  const v0 = allVars[0];
-  const [o1, o2, o3, o4, o5, p1, p2, T_turns] = variantToIntTuple(v0);
-  const parries: number[] = [];
-  let maxConservationErr = 0;
-  for (const doc of ALL_DOCTRINES) {
-    const res = simulateBatchKernel(
-      o1,
-      o2,
-      o3,
-      o4,
-      o5,
-      p1,
-      p2,
-      T_turns,
-      4,
-      doc.doctrine_id,
-      0.5,
-      150,
-      12345,
-      TOPOLOGIES[v0.P1_topologie],
-      TOPOLOGY_LENGTHS[v0.P1_topologie],
-      INITIAL_TRACKS[v0.O4_init_piste]
-    );
-    const sumStates = res[2] + res[3] + res[4];
-    maxConservationErr = Math.max(maxConservationErr, Math.abs(sumStates - 100.0));
-    parries.push(res[10]);
-  }
-  const parrySpread = Math.max(...parries) - Math.min(...parries);
-  results.push({
-    name: '2. Conservation des 3 états (100%) & Iso-Effort (D0..D5)',
-    passed: maxConservationErr < 1e-4 && parrySpread < 1.35,
-    detail: `Somme états = ${(100 - maxConservationErr).toFixed(4)}% | Écart max parades = ${parrySpread.toFixed(2)}`,
-  });
-
-  // Test 3: Simplicity discrimination
-  const vSimple = allVars.find(
-    (v) =>
-      v.O1_eligibilite === 'Strict' &&
-      v.O2_boost === 'Sur_Place_x2' &&
-      v.O3_apprentissage === 'Standard_1' &&
-      v.P2_largeur_vague === 'Proportionnel_Sup' &&
-      v.P3_duree_tours === 12
-  )!;
-  const vComplex = allVars.find(
-    (v) =>
-      v.O1_eligibilite === 'Souple' &&
-      v.O2_boost === 'Debordement' &&
-      v.O3_apprentissage === 'Cumulatif_K' &&
-      v.P2_largeur_vague === 'Proportionnel_Large' &&
-      v.P3_duree_tours === 20
-  )!;
-  const mSimple = evaluateSingleVariant(vSimple, [4], [0.5], 80, 999);
-  const mComplex = evaluateSingleVariant(vComplex, [4], [0.5], 80, 999);
-  results.push({
-    name: '3. Discrimination cognitive & physique (M4 Simplicité)',
-    passed:
-      mSimple.M4_simplicite > mComplex.M4_simplicite + 15.0 &&
-      mSimple.ops_cog_par_tour < mComplex.ops_cog_par_tour,
-    detail: `Simple M4=${mSimple.M4_simplicite} (${mSimple.gestes_phys_par_tour} gestes) vs Complexe M4=${mComplex.M4_simplicite} (${mComplex.gestes_phys_par_tour} gestes)`,
-  });
-
-  return results;
-}
+const CHECKPOINT_STORAGE_KEY = 'foret_automate_lab_v2_checkpoint_v1';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'podium' | 'sensitivity' | 'dynamics' | 'report'>('podium');
+  // Navigation between the 4 Views (Section 8)
+  const [activeView, setActiveView] = useState<ActiveView>('lab');
 
-  // Simulation parameters
-  const [presetMode, setPresetMode] = useState<'sample' | 'quick2916' | 'custom'>('sample');
-  const [nGames, setNGames] = useState<number>(30);
-  const [playerCounts, setPlayerCounts] = useState<number[]>([4]);
-  const [effortRates, setEffortRates] = useState<number[]>([0.5]);
-  const [weights, setWeights] = useState<MetricsWeights>({
-    w_maitrise: 0.3,
-    w_adaptation: 0.25,
-    w_tension: 0.25,
-    w_simplicite: 0.2,
+  // View 1: Studio d'Automates (Level 2 Family state)
+  const [selectedFamilyIdx, setSelectedFamilyIdx] = useState<number>(0);
+  const [activeFamily, setActiveFamily] = useState<FamilySpecDSL>(PRELOADED_FAMILIES[0]);
+  const [studioTab, setStudioTab] = useState<'visual' | 'code'>('visual');
+  const [codeText, setCodeText] = useState<string>(() =>
+    JSON.stringify(PRELOADED_FAMILIES[0], null, 2)
+  );
+  const [codeError, setCodeError] = useState<string | null>(null);
+
+  // View 2: Configurateur de Campagne, Bots & Pondérations
+  const [explorationMode, setExplorationMode] = useState<ExplorationMode>('grid_sh');
+  const [useMultiFidelitySh, setUseMultiFidelitySh] = useState<boolean>(true);
+  const [scaleGamesFactor, setScaleGamesFactor] = useState<number>(20); // Base MC games per bot in Rung 1
+  const [gaPopSize, setGaPopSize] = useState<number>(36);
+  const [gaGenerations, setGaGenerations] = useState<number>(5);
+  const [maxAllowedComplexity, setMaxAllowedComplexity] = useState<number>(4.5);
+
+  const [playerCounts, setPlayerCounts] = useState<number[]>([3, 4, 5, 6]);
+  const [effortRates, setEffortRates] = useState<number[]>([0.3, 0.5, 0.7]);
+  const [weights, setWeights] = useState<WeightsV2>({
+    w1_maitrise: 0.3,
+    w2_adaptation: 0.25,
+    w3_tension: 0.25,
+    w4_simplicite: 0.2,
   });
 
-  // Running state
-  const [isRunning, setIsRunning] = useState(false);
-  const [progress, setProgress] = useState({ done: 0, total: 0, speedGamesSec: 0, elapsedSec: 0 });
-  const cancelRef = useRef(false);
+  // View 3: Console & Execution State
+  const [isRunning, setIsRunning] = useState<boolean>(false);
+  const [isPaused, setIsPaused] = useState<boolean>(false);
+  const [hasCheckpoint, setHasCheckpoint] = useState<boolean>(false);
+  const pauseRef = useRef<boolean>(false);
+  const stopRef = useRef<boolean>(false);
 
-  // Results state
-  const [results, setResults] = useState<EvaluatedVariant[]>([]);
-  const [selectedVariant, setSelectedVariant] = useState<EvaluatedVariant | null>(null);
-  const [turnProfile, setTurnProfile] = useState<TurnProfile | null>(null);
-  const [unitTests, setUnitTests] = useState<UnitTestResult[]>([]);
+  const [telemetry, setTelemetry] = useState<TelemetryState>({
+    phaseLabel: 'Prêt',
+    currentRungOrGen: 0,
+    maxRungOrGen: 3,
+    doneInPhase: 0,
+    totalInPhase: 0,
+    totalGamesSimulated: 0,
+    speedGamesPerSec: 0,
+    elapsedSec: 0,
+    rung1Count: 0,
+    rung2Survivors: 0,
+    rung3Certified: 0,
+    nichesDiscovered: 0,
+    generationHistory: [],
+  });
 
-  // Table filters
-  const [searchQuery, setSearchQuery] = useState('');
-  const [paretoOnly, setParetoOnly] = useState(false);
-  const [filterO1, setFilterO1] = useState('ALL');
-  const [filterO2, setFilterO2] = useState('ALL');
-  const [filterO3, setFilterO3] = useState('ALL');
-  const [filterP1, setFilterP1] = useState('ALL');
+  // View 4: Results, MAP-Elites Archive & Selected Automaton
+  const [population, setPopulation] = useState<EvaluatedAutomatonV2[]>([]);
+  const [mapElitesArchive, setMapElitesArchive] = useState<Map<string, EvaluatedAutomatonV2>>(
+    new Map()
+  );
+  const [selectedAutomaton, setSelectedAutomaton] = useState<EvaluatedAutomatonV2 | null>(null);
+  const [turnProfile, setTurnProfile] = useState<TurnByTurnProfileV2 | null>(null);
+  const [activeZSlice, setActiveZSlice] = useState<number | 'ALL'>('ALL');
+  const [labSubTab, setLabSubTab] = useState<'ranking' | 'map_elites' | 'sensitivity' | 'report'>(
+    'ranking'
+  );
+  const [searchFilter, setSearchFilter] = useState<string>('');
+  const [paretoOnlyFilter, setParetoOnlyFilter] = useState<boolean>(false);
 
-  // Run unit tests and an instant initial evaluation on mount
+  // Sync Family selection
+  const selectPreloadedFamily = (idx: number) => {
+    setSelectedFamilyIdx(idx);
+    const fam = structuredClone(PRELOADED_FAMILIES[idx]);
+    setActiveFamily(fam);
+    setCodeText(JSON.stringify(fam, null, 2));
+    setCodeError(null);
+  };
+
+  // Compile Level 2 Family into Level 3 Genomes for live preview & validation
+  const compiledPreviewGenomes = useMemo(
+    () => compileFamilyToGenomes(activeFamily, 600),
+    [activeFamily]
+  );
+  const exactSweepCount = useMemo(() => countFamilySweepVariants(activeFamily), [activeFamily]);
+
+  // Instant reweighting on slider change without re-running simulations (Section 8.2)
+  const handleWeightChange = (key: keyof WeightsV2, rawVal: number) => {
+    const next = { ...weights, [key]: rawVal };
+    const sum =
+      next.w1_maitrise + next.w2_adaptation + next.w3_tension + next.w4_simplicite;
+    const norm: WeightsV2 =
+      sum > 0
+        ? {
+            w1_maitrise: Number((next.w1_maitrise / sum).toFixed(2)),
+            w2_adaptation: Number((next.w2_adaptation / sum).toFixed(2)),
+            w3_tension: Number((next.w3_tension / sum).toFixed(2)),
+            w4_simplicite: Number((next.w4_simplicite / sum).toFixed(2)),
+          }
+        : next;
+    setWeights(norm);
+    if (population.length > 0) {
+      const reranked = reweightAndRankPopulation(population, norm);
+      setPopulation(reranked);
+      if (selectedAutomaton) {
+        const updatedSel = reranked.find((r) => r.id === selectedAutomaton.id) || reranked[0];
+        setSelectedAutomaton(updatedSel);
+      }
+    }
+  };
+
+  // Update Turn-by-Turn Profile whenever selectedAutomaton changes
   useEffect(() => {
-    setUnitTests(runEngineUnitTests());
-    launchSimulation('sample', 25, [4], [0.5]);
+    if (selectedAutomaton) {
+      const prof = simulateTurnProfileV2(selectedAutomaton.genome, 4, 0.5, 90, 4242);
+      setTurnProfile(prof);
+    }
+  }, [selectedAutomaton]);
+
+  // Check for saved checkpoint & run initial fast multi-fidelity campaign on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(CHECKPOINT_STORAGE_KEY);
+    if (saved) setHasCheckpoint(true);
+    runCampaignExecution('grid_sh', PRELOADED_FAMILIES[0]);
     return () => {
-      cancelRef.current = true;
+      stopRef.current = true;
     };
   }, []);
 
-  useEffect(() => {
-    if (selectedVariant) {
-      const prof = simulateTurnByTurnProfile(selectedVariant, 4, 0.5, 250, 4242);
-      setTurnProfile(prof);
-    }
-  }, [selectedVariant]);
-
-  const launchSimulation = (
-    mode: 'sample' | 'quick2916' | 'custom',
-    overrideGames?: number,
-    overridePlayers?: number[],
-    overrideEfforts?: number[]
+  const updateArchiveWithBatch = (
+    archive: Map<string, EvaluatedAutomatonV2>,
+    batch: EvaluatedAutomatonV2[]
   ) => {
-    cancelRef.current = false;
+    for (const item of batch) {
+      const existing = archive.get(item.nicheKey);
+      if (!existing || item.scoreGlobal > existing.scoreGlobal) {
+        archive.set(item.nicheKey, item);
+      }
+    }
+  };
+
+  /**
+   * Exécution asynchrone de la Campagne :
+   * - Mode 1 ('grid_sh') : Grille Cartésienne + Entonnoir Successive Halving à 3 Étages (Rung 1 -> Rung 2 -> Rung 3)
+   * - Mode 2 ('genetic_qd') : Algorithme Évolutionnaire Hybride NSGA-II + MAP-Elites (800 niches)
+   */
+  const runCampaignExecution = async (
+    modeToRun: ExplorationMode = explorationMode,
+    familyToUse: FamilySpecDSL = activeFamily
+  ) => {
+    stopRef.current = false;
+    pauseRef.current = false;
     setIsRunning(true);
+    setIsPaused(false);
 
-    const gamesToRun = overrideGames ?? nGames;
-    const pCounts = overridePlayers ?? playerCounts;
-    const eRates = overrideEfforts ?? effortRates;
-
-    // In 'sample' mode, evaluate a representative stratified grid of 324 variants (100% of O1, O2, O3, O5, P1, P2 at T=16, O4=Centre_Coupe/Alterne) for instant startup
-    const allVariants =
-      mode === 'sample'
-        ? generateVariants({
-            O4_init_piste: ['6C_5T_Centre_Coupe', '6C_5T_Alterne'],
-            P3_duree_tours: [12, 16],
-          })
-        : generateVariants();
-
-    const totalVars = allVariants.length;
-    const gamesPerVar = ALL_DOCTRINES.length * pCounts.length * eRates.length * gamesToRun;
-    const chunkSize = 36;
-    const evaluated: EvaluatedVariant[] = [];
     const t0 = performance.now();
+    let totalGamesSim = 0;
+    const archive = new Map<string, EvaluatedAutomatonV2>(mapElitesArchive);
+    const initialGenomes = compileFamilyToGenomes(familyToUse, 256);
 
-    setProgress({ done: 0, total: totalVars, speedGamesSec: 0, elapsedSec: 0 });
+    if (initialGenomes.length === 0) {
+      setIsRunning(false);
+      return;
+    }
 
-    let idx = 0;
-    const stepChunk = () => {
-      if (cancelRef.current) {
-        setIsRunning(false);
-        return;
-      }
-      const end = Math.min(idx + chunkSize, totalVars);
-      for (let i = idx; i < end; i++) {
-        evaluated.push(
-          evaluateSingleVariant(allVariants[i], pCounts, eRates, gamesToRun, 20261025, weights)
-        );
-      }
-      idx = end;
-      const elapsedSec = Math.max(0.001, (performance.now() - t0) / 1000);
-      const speedGamesSec = Math.round((idx * gamesPerVar) / elapsedSec);
+    const yieldToBrowser = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-      setProgress({
-        done: idx,
-        total: totalVars,
-        speedGamesSec,
-        elapsedSec,
-      });
+    if (modeToRun === 'grid_sh') {
+      // =====================================================================
+      // MODE GRILLE CARTÉSIENNE + ENTONNOIR MULTI-FIDÉLITÉ À 3 ÉTAGES (SH)
+      // =====================================================================
+      const totalVars = initialGenomes.length;
+      const rung1Results: EvaluatedAutomatonV2[] = [];
+      const chunkSize = 12;
 
-      if (idx < totalVars) {
-        setTimeout(stepChunk, 0);
-      } else {
-        const ranked = flagParetoFront(evaluated);
-        setResults(ranked);
-        if (ranked.length > 0) {
-          setSelectedVariant(ranked[0]);
+      // ÉTAGE 1 (Tamis Rapide : 100% de la population, J=4, effort=50%)
+      for (let i = 0; i < totalVars; i += chunkSize) {
+        if (stopRef.current) break;
+        while (pauseRef.current && !stopRef.current) {
+          await new Promise((r) => setTimeout(r, 150));
         }
-        setIsRunning(false);
+        const end = Math.min(i + chunkSize, totalVars);
+        for (let k = i; k < end; k++) {
+          const ev = evaluateAutomatonScientific(
+            initialGenomes[k],
+            [4],
+            [0.5],
+            scaleGamesFactor,
+            20261027,
+            weights,
+            1,
+            0
+          );
+          rung1Results.push(ev);
+          totalGamesSim += 7 * scaleGamesFactor;
+        }
+        updateArchiveWithBatch(archive, rung1Results.slice(i, end));
+        const elapsed = Math.max(0.001, (performance.now() - t0) / 1000);
+        setTelemetry((prev) => ({
+          ...prev,
+          phaseLabel: 'Étage 1 / 3 — Tamis Rapide (100% Pop)',
+          currentRungOrGen: 1,
+          maxRungOrGen: useMultiFidelitySh ? 3 : 1,
+          doneInPhase: end,
+          totalInPhase: totalVars,
+          totalGamesSimulated: totalGamesSim,
+          speedGamesPerSec: Math.round(totalGamesSim / elapsed),
+          elapsedSec: elapsed,
+          rung1Count: end,
+          nichesDiscovered: archive.size,
+        }));
+        await yieldToBrowser();
       }
-    };
 
-    setTimeout(stepChunk, 10);
-  };
+      let finalPool = reweightAndRankPopulation(rung1Results, weights);
 
-  const stopSimulation = () => {
-    cancelRef.current = true;
+      if (useMultiFidelitySh && !stopRef.current) {
+        // ÉTAGE 2 (Calibrage : Top 25% survivants, J in {4,5}, efforts {30%, 50%})
+        const top25Count = Math.max(4, Math.ceil(finalPool.length * 0.25));
+        const rung2Candidates = finalPool.slice(0, top25Count);
+        const rung2Updated = new Map<number, EvaluatedAutomatonV2>();
+
+        for (let i = 0; i < rung2Candidates.length; i += 6) {
+          if (stopRef.current) break;
+          while (pauseRef.current && !stopRef.current) {
+            await new Promise((r) => setTimeout(r, 150));
+          }
+          const end = Math.min(i + 6, rung2Candidates.length);
+          for (let k = i; k < end; k++) {
+            const cand = rung2Candidates[k];
+            const spec: CompiledGenomeSpec = {
+              id: cand.id,
+              code: cand.code,
+              familyId: cand.familyId,
+              genome: cand.genome,
+              staticComplexity: cand.cRegleStatic,
+              summaryChoices: {},
+            };
+            const ev2 = evaluateAutomatonScientific(
+              spec,
+              [4, 5],
+              [0.3, 0.5],
+              scaleGamesFactor * 2,
+              20261027,
+              weights,
+              2,
+              0
+            );
+            rung2Updated.set(ev2.id, ev2);
+            totalGamesSim += 7 * 2 * 2 * (scaleGamesFactor * 2);
+          }
+          const elapsed = Math.max(0.001, (performance.now() - t0) / 1000);
+          setTelemetry((prev) => ({
+            ...prev,
+            phaseLabel: 'Étage 2 / 3 — Calibrage Multi-Tables (Top 25%)',
+            currentRungOrGen: 2,
+            maxRungOrGen: 3,
+            doneInPhase: end,
+            totalInPhase: rung2Candidates.length,
+            totalGamesSimulated: totalGamesSim,
+            speedGamesPerSec: Math.round(totalGamesSim / elapsed),
+            elapsedSec: elapsed,
+            rung2Survivors: rung2Candidates.length,
+            nichesDiscovered: archive.size,
+          }));
+          await yieldToBrowser();
+        }
+
+        finalPool = reweightAndRankPopulation(
+          finalPool.map((item) => rung2Updated.get(item.id) || item),
+          weights
+        );
+        updateArchiveWithBatch(archive, Array.from(rung2Updated.values()));
+
+        // ÉTAGE 3 (Certification Haute Précision : Top 5% + Front de Pareto)
+        const top5Count = Math.max(3, Math.ceil(totalVars * 0.06));
+        const rung3Candidates = finalPool.slice(0, top5Count);
+        const rung3Updated = new Map<number, EvaluatedAutomatonV2>();
+
+        for (let i = 0; i < rung3Candidates.length; i += 3) {
+          if (stopRef.current) break;
+          while (pauseRef.current && !stopRef.current) {
+            await new Promise((r) => setTimeout(r, 150));
+          }
+          const end = Math.min(i + 3, rung3Candidates.length);
+          for (let k = i; k < end; k++) {
+            const cand = rung3Candidates[k];
+            const spec: CompiledGenomeSpec = {
+              id: cand.id,
+              code: cand.code,
+              familyId: cand.familyId,
+              genome: cand.genome,
+              staticComplexity: cand.cRegleStatic,
+              summaryChoices: {},
+            };
+            const ev3 = evaluateAutomatonScientific(
+              spec,
+              playerCounts,
+              effortRates,
+              scaleGamesFactor * 3,
+              20261027,
+              weights,
+              3,
+              0
+            );
+            rung3Updated.set(ev3.id, ev3);
+            totalGamesSim +=
+              7 * playerCounts.length * effortRates.length * (scaleGamesFactor * 3);
+          }
+          const elapsed = Math.max(0.001, (performance.now() - t0) / 1000);
+          setTelemetry((prev) => ({
+            ...prev,
+            phaseLabel: 'Étage 3 / 3 — Certification Haute Précision (Top 5% & Pareto)',
+            currentRungOrGen: 3,
+            maxRungOrGen: 3,
+            doneInPhase: end,
+            totalInPhase: rung3Candidates.length,
+            totalGamesSimulated: totalGamesSim,
+            speedGamesPerSec: Math.round(totalGamesSim / elapsed),
+            elapsedSec: elapsed,
+            rung3Certified: rung3Candidates.length,
+            nichesDiscovered: archive.size,
+          }));
+          await yieldToBrowser();
+        }
+
+        finalPool = reweightAndRankPopulation(
+          finalPool.map((item) => rung3Updated.get(item.id) || item),
+          weights
+        );
+        updateArchiveWithBatch(archive, Array.from(rung3Updated.values()));
+      }
+
+      setPopulation(finalPool);
+      setMapElitesArchive(new Map(archive));
+      if (finalPool.length > 0) setSelectedAutomaton(finalPool[0]);
+
+      // Save checkpoint in localStorage
+      try {
+        localStorage.setItem(
+          CHECKPOINT_STORAGE_KEY,
+          JSON.stringify({
+            timestamp: Date.now(),
+            mode: modeToRun,
+            count: finalPool.length,
+          })
+        );
+        setHasCheckpoint(true);
+      } catch {
+        // ignore storage quota
+      }
+    } else {
+      // =====================================================================
+      // MODE ALGORITHME ÉVOLUTIONNAIRE HYBRIDE NSGA-II + MAP-ELITES (800 NICHES)
+      // =====================================================================
+      let currentSpecs = initialGenomes.slice(0, gaPopSize);
+      let allEvaluated: EvaluatedAutomatonV2[] = [];
+      let nextId = initialGenomes.length + 1;
+      const genHist: Array<{
+        gen: number;
+        bestScore: number;
+        meanPareto: number;
+        niches: number;
+      }> = [];
+
+      for (let gen = 1; gen <= gaGenerations; gen++) {
+        if (stopRef.current) break;
+        const genBatch: EvaluatedAutomatonV2[] = [];
+
+        for (let i = 0; i < currentSpecs.length; i += 6) {
+          if (stopRef.current) break;
+          while (pauseRef.current && !stopRef.current) {
+            await new Promise((r) => setTimeout(r, 150));
+          }
+          const end = Math.min(i + 6, currentSpecs.length);
+          for (let k = i; k < end; k++) {
+            const ev = evaluateAutomatonScientific(
+              currentSpecs[k],
+              [4],
+              [0.5],
+              scaleGamesFactor * 2,
+              20261027 + gen * 997,
+              weights,
+              2,
+              gen
+            );
+            genBatch.push(ev);
+            totalGamesSim += 7 * (scaleGamesFactor * 2);
+          }
+          updateArchiveWithBatch(archive, genBatch.slice(i, end));
+          const elapsed = Math.max(0.001, (performance.now() - t0) / 1000);
+          setTelemetry((prev) => ({
+            ...prev,
+            phaseLabel: `Évolution NSGA-II + MAP-Elites — Génération ${gen} / ${gaGenerations}`,
+            currentRungOrGen: gen,
+            maxRungOrGen: gaGenerations,
+            doneInPhase: end,
+            totalInPhase: currentSpecs.length,
+            totalGamesSimulated: totalGamesSim,
+            speedGamesPerSec: Math.round(totalGamesSim / elapsed),
+            elapsedSec: elapsed,
+            nichesDiscovered: archive.size,
+          }));
+          await yieldToBrowser();
+        }
+
+        allEvaluated = reweightAndRankPopulation([...allEvaluated, ...genBatch], weights);
+        const paretoMembers = allEvaluated.filter((x) => x.isPareto4D);
+        const meanPareto =
+          paretoMembers.reduce((a, b) => a + b.scoreGlobal, 0) /
+          Math.max(1, paretoMembers.length);
+
+        genHist.push({
+          gen,
+          bestScore: allEvaluated[0]?.scoreGlobal ?? 0,
+          meanPareto: Number(meanPareto.toFixed(2)),
+          niches: archive.size,
+        });
+
+        setTelemetry((prev) => ({
+          ...prev,
+          generationHistory: [...genHist],
+          nichesDiscovered: archive.size,
+        }));
+
+        setPopulation(allEvaluated);
+        setMapElitesArchive(new Map(archive));
+        if (allEvaluated.length > 0) setSelectedAutomaton(allEvaluated[0]);
+
+        // Reproduction : 50% parents tirés du Front de Pareto NSGA-II, 50% tirés uniformément de l'Archive MAP-Elites
+        if (gen < gaGenerations) {
+          const archiveList = Array.from(archive.values());
+          const paretoPool = paretoMembers.length >= 2 ? paretoMembers : allEvaluated.slice(0, 10);
+          const nextGenSpecs: CompiledGenomeSpec[] = [];
+
+          for (let p = 0; p < gaPopSize; p++) {
+            const parentA = paretoPool[Math.floor(Math.random() * paretoPool.length)];
+            const parentB =
+              archiveList.length > 0
+                ? archiveList[Math.floor(Math.random() * archiveList.length)]
+                : paretoPool[Math.floor(Math.random() * paretoPool.length)];
+            nextGenSpecs.push(
+              breedOffspringGenome(parentA, parentB, nextId++, gen + 1, maxAllowedComplexity)
+            );
+          }
+          currentSpecs = nextGenSpecs;
+        }
+      }
+    }
+
     setIsRunning(false);
+    setIsPaused(false);
   };
 
-  const filteredResults = useMemo(() => {
-    return results.filter((r) => {
-      if (paretoOnly && !r.is_pareto_4d) return false;
-      if (filterO1 !== 'ALL' && r.O1_eligibilite !== filterO1) return false;
-      if (filterO2 !== 'ALL' && r.O2_boost !== filterO2) return false;
-      if (filterO3 !== 'ALL' && r.O3_apprentissage !== filterO3) return false;
-      if (filterP1 !== 'ALL' && r.P1_topologie !== filterP1) return false;
-      if (searchQuery.trim() !== '') {
-        const q = searchQuery.toLowerCase();
-        if (!r.code.toLowerCase().includes(q)) return false;
+  // Filtered ranking table
+  const filteredPopulation = useMemo(() => {
+    return population.filter((item) => {
+      if (paretoOnlyFilter && !item.isPareto4D) return false;
+      if (searchFilter.trim() !== '') {
+        const q = searchFilter.toLowerCase();
+        if (
+          !item.code.toLowerCase().includes(q) &&
+          !item.familyId.toLowerCase().includes(q)
+        ) {
+          return false;
+        }
       }
       return true;
     });
-  }, [results, paretoOnly, filterO1, filterO2, filterO3, filterP1, searchQuery]);
+  }, [population, paretoOnlyFilter, searchFilter]);
 
-  const sensitivityRows = useMemo(() => computeSensitivityAnalysis(results), [results]);
+  const sensitivityRows = useMemo(
+    () => computeSensitivityAnalysisV2(population),
+    [population]
+  );
 
-  const markdownReport = useMemo(() => {
-    if (!results.length || !turnProfile) return '';
-    return generateMarkdownReport(
-      results,
+  const selectedRulebook = useMemo(() => {
+    if (!selectedAutomaton) return null;
+    return translateGenomeToHumanRulebook(selectedAutomaton.genome, selectedAutomaton.code);
+  }, [selectedAutomaton]);
+
+  const fullMarkdownReport = useMemo(() => {
+    return generateFullCampaignReportV2(
+      population,
+      mapElitesArchive,
       sensitivityRows,
       turnProfile,
-      presetMode === 'quick2916' ? 'campagne_complete_2916' : 'campagne_pilote_rapide',
-      nGames,
-      playerCounts,
-      effortRates,
-      progress.elapsedSec
+      explorationMode,
+      weights,
+      telemetry.elapsedSec
     );
-  }, [results, sensitivityRows, turnProfile, presetMode, nGames, playerCounts, effortRates, progress.elapsedSec]);
+  }, [
+    population,
+    mapElitesArchive,
+    sensitivityRows,
+    turnProfile,
+    explorationMode,
+    weights,
+    telemetry.elapsedSec,
+  ]);
 
-  const downloadFile = (filename: string, content: string, mime: string) => {
+  const downloadBlob = (filename: string, content: string, mime = 'text/plain;charset=utf-8') => {
     const blob = new Blob([content], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -288,694 +596,1616 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-  const top1 = results[0];
-  const paretoCount = useMemo(() => results.filter((r) => r.is_pareto_4d).length, [results]);
+  const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const txt = String(ev.target?.result || '');
+      setCodeText(txt);
+      try {
+        const parsed = JSON.parse(txt) as FamilySpecDSL;
+        if (parsed.family_id && Array.isArray(parsed.tactics)) {
+          setActiveFamily(parsed);
+          setCodeError(null);
+        } else {
+          setCodeError('Schéma invalide : family_id et tactics[] requis.');
+        }
+      } catch (err: any) {
+        setCodeError(`Erreur de syntaxe JSON : ${err.message}`);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const paretoCount = useMemo(
+    () => population.filter((x) => x.isPareto4D).length,
+    [population]
+  );
 
   return (
-    <div className="min-h-screen bg-stone-950 text-stone-100 flex flex-col">
-      {/* Top Header */}
-      <header className="border-b border-stone-800 bg-stone-900/80 backdrop-blur sticky top-0 z-20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-              <Trees className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-lg font-bold tracking-tight text-white">
-                  forêt-automate-lab
-                </h1>
-                <span className="text-xs font-mono uppercase px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                  Monte-Carlo 4D Pareto
-                </span>
-              </div>
-              <p className="text-xs text-stone-400">
-                Banc d&apos;essai des 2 916 variantes cartésiennes — Automate en couloirs unidirectionnels (Abatteuse + Terrassier)
-              </p>
-            </div>
+    <div className="min-h-screen bg-[#090D16] text-slate-100 flex flex-col">
+      {/* STRICT 3-ZONE TOP BAR CONTRACT */}
+      <header className="flex items-center justify-between gap-8 px-6 py-3.5 border-b border-slate-800 bg-[#090D16]/95 sticky top-0 z-30">
+        {/* Zone 1: Brand Title (single text element, one line) */}
+        <a
+          href="#top"
+          onClick={(e) => {
+            e.preventDefault();
+            setActiveView('lab');
+          }}
+          className="text-base font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0 font-display"
+        >
+          Forêt Automate Lab v2
+        </a>
+
+        {/* Zone 2: 4 Concise Single-Line Navigation Links */}
+        <nav className="flex items-center gap-6 text-sm font-medium text-slate-400 overflow-x-auto">
+          <button
+            onClick={() => setActiveView('studio')}
+            className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer border-b-2 ${
+              activeView === 'studio'
+                ? 'text-slate-100 border-emerald-500'
+                : 'border-transparent hover:text-slate-200'
+            }`}
+          >
+            01. Studio Niveau 2
+          </button>
+          <button
+            onClick={() => setActiveView('config')}
+            className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer border-b-2 ${
+              activeView === 'config'
+                ? 'text-slate-100 border-emerald-500'
+                : 'border-transparent hover:text-slate-200'
+            }`}
+          >
+            02. Configurateur
+          </button>
+          <button
+            onClick={() => setActiveView('console')}
+            className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer border-b-2 ${
+              activeView === 'console'
+                ? 'text-slate-100 border-emerald-500'
+                : 'border-transparent hover:text-slate-200'
+            }`}
+          >
+            03. Console & Télémétrie
+          </button>
+          <button
+            onClick={() => setActiveView('lab')}
+            className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer border-b-2 ${
+              activeView === 'lab'
+                ? 'text-slate-100 border-emerald-500'
+                : 'border-transparent hover:text-slate-200'
+            }`}
+          >
+            04. Laboratoire & Règles
+          </button>
+        </nav>
+
+        {/* Zone 3: 1 Primary Action Button */}
+        <div className="flex items-center shrink-0">
+          <button
+            onClick={() => {
+              setActiveView('console');
+              runCampaignExecution(explorationMode, activeFamily);
+            }}
+            disabled={isRunning}
+            className="px-4 py-2 text-xs font-semibold text-slate-950 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            {isRunning ? 'Simulation en cours...' : 'Lancer la Campagne'}
+          </button>
+        </div>
+      </header>
+
+      {/* Top Scientific Telemetry Ribbon (Section 3 of Science Reference) */}
+      <div className="border-b border-slate-800/80 bg-[#111827] px-6 py-2">
+        <div className="max-w-[1400px] mx-auto flex flex-wrap items-center justify-between gap-4 text-xs text-slate-400 font-mono tabular-nums">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-slate-200 font-semibold">{activeFamily.family_id}</span>
+            <span>·</span>
+            <span>Génome Niveau 3 : {GENOME_SIZE} int32 ({GENOME_BYTES} octets)</span>
+            <span>·</span>
+            <span>Variantes $sweep : {exactSweepCount.toLocaleString('fr-FR')}</span>
+            <span>·</span>
+            <span>
+              Mode :{' '}
+              {explorationMode === 'grid_sh'
+                ? 'Successive Halving 3 Étages (11.48x)'
+                : 'NSGA-II + MAP-Elites (800 niches)'}
+            </span>
           </div>
-
-          <div className="flex items-center gap-2.5">
-            {!isRunning ? (
-              <>
-                <button
-                  onClick={() => {
-                    setPresetMode('sample');
-                    setNGames(25);
-                    launchSimulation('sample', 25, playerCounts, effortRates);
-                  }}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium bg-stone-800 hover:bg-stone-700 text-stone-200 border border-stone-700 transition cursor-pointer"
-                >
-                  <Play className="w-3.5 h-3.5 text-emerald-400" />
-                  Tri Rapide (648 var.)
-                </button>
-                <button
-                  onClick={() => {
-                    setPresetMode('quick2916');
-                    launchSimulation('quick2916', nGames, playerCounts, effortRates);
-                  }}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition cursor-pointer"
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  Lancer les 2 916 Variantes
-                </button>
-              </>
-            ) : (
-              <button
-                onClick={stopSimulation}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white transition cursor-pointer"
-              >
-                <Square className="w-3.5 h-3.5" />
-                Interrompre ({Math.round((100 * progress.done) / Math.max(1, progress.total))}%)
-              </button>
-            )}
-
-            <button
-              onClick={() =>
-                downloadFile(
-                  'variants_ranking.csv',
-                  exportVariantsCsv(results),
-                  'text/csv;charset=utf-8'
-                )
-              }
-              disabled={!results.length}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-stone-800 hover:bg-stone-700 disabled:opacity-40 text-stone-200 border border-stone-700 transition cursor-pointer"
-            >
-              <Download className="w-3.5 h-3.5" />
-              CSV
-            </button>
+          <div className="flex items-center gap-3">
+            <span>
+              Parties MC : <strong className="text-slate-200">{telemetry.totalGamesSimulated.toLocaleString('fr-FR')}</strong>
+            </span>
+            <span>·</span>
+            <span>
+              Débit : <strong className="text-emerald-400">{telemetry.speedGamesPerSec.toLocaleString('fr-FR')} parties/s</strong>
+            </span>
+            <span>·</span>
+            <span>
+              Niches MAP-Elites : <strong className="text-cyan-400">{mapElitesArchive.size} / 800</strong>
+            </span>
           </div>
         </div>
+      </div>
 
-        {/* Live Progress Bar */}
-        {(isRunning || progress.done > 0) && (
-          <div className="bg-stone-950/90 border-t border-stone-800/80 px-4 sm:px-6 py-2">
-            <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2 text-xs">
-              <div className="flex items-center gap-3">
-                <span className="font-mono text-emerald-400">
-                  [{progress.done.toLocaleString('fr-FR')} / {progress.total.toLocaleString('fr-FR')} variantes]
+      {/* MAIN WORKSPACE CONTAINER (1400px Desktop Presence) */}
+      <main className="max-w-[1400px] w-full mx-auto px-6 py-6 flex-1 space-y-6">
+        {/* ===================================================================
+            VUE 1 — STUDIO D'AUTOMATES (NIVEAU 2 : ÉDITEUR VISUEL & CODE)
+           =================================================================== */}
+        {activeView === 'studio' && (
+          <div className="space-y-6">
+            {/* Family Library Selector & Import/Export Toolbar */}
+            <div className="bg-[#111827] border border-slate-800 p-5 flex flex-wrap items-center justify-between gap-4">
+              <div className="space-y-1">
+                <h1 className="text-xl font-bold text-slate-100">
+                  01. Studio d&apos;Automates — Modèle Déclaratif de Famille (Niveau 2)
+                </h1>
+                <p className="text-xs text-slate-400">
+                  Configurez les tactiques, les 18 capteurs, les 9 verbes, les lois de casse/élan et les balayages{' '}
+                  <code className="text-emerald-400">$sweep</code> avant compilation en vecteurs de 447 entiers{' '}
+                  <code className="text-cyan-400">int32</code>.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {PRELOADED_FAMILIES.map((fam, idx) => (
+                  <button
+                    key={fam.family_id}
+                    onClick={() => selectPreloadedFamily(idx)}
+                    className={`px-3 py-2 text-xs font-medium transition cursor-pointer whitespace-nowrap shrink-0 border ${
+                      selectedFamilyIdx === idx
+                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/50'
+                        : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200'
+                    }`}
+                  >
+                    {fam.family_id.replace('Famille_', '').replaceAll('_', ' ')}
+                  </button>
+                ))}
+
+                <label className="px-3 py-2 text-xs font-medium bg-slate-950 hover:bg-slate-800 text-slate-200 border border-slate-800 transition cursor-pointer inline-flex items-center gap-1.5 whitespace-nowrap shrink-0">
+                  <Upload className="w-3.5 h-3.5" />
+                  Importer .json
+                  <input type="file" accept=".json,.yaml,.yml" onChange={handleFileImport} className="hidden" />
+                </label>
+
+                <button
+                  onClick={() =>
+                    downloadBlob(
+                      `${activeFamily.family_id}.json`,
+                      JSON.stringify(activeFamily, null, 2),
+                      'application/json'
+                    )
+                  }
+                  className="px-3 py-2 text-xs font-medium bg-slate-950 hover:bg-slate-800 text-slate-200 border border-slate-800 transition cursor-pointer inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Exporter Niveau 2
+                </button>
+              </div>
+            </div>
+
+            {/* Mode Switch: Visual Editor vs Declarative Code */}
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setStudioTab('visual')}
+                  className={`px-4 py-2 text-xs font-semibold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                    studioTab === 'visual'
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'bg-[#111827] text-slate-400 border border-slate-800 hover:text-slate-200'
+                  }`}
+                >
+                  Constructeur Visuel Structuré (Tactiques & Slots)
+                </button>
+                <button
+                  onClick={() => {
+                    setCodeText(JSON.stringify(activeFamily, null, 2));
+                    setStudioTab('code');
+                  }}
+                  className={`px-4 py-2 text-xs font-semibold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                    studioTab === 'code'
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'bg-[#111827] text-slate-400 border border-slate-800 hover:text-slate-200'
+                  }`}
+                >
+                  Éditeur Déclaratif ($sweep JSON/YAML)
+                </button>
+              </div>
+
+              <div className="text-xs font-mono tabular-nums text-slate-400">
+                Cardinalité $sweep : <strong className="text-emerald-400">{exactSweepCount}</strong> variantes · Échantillon compilé :{' '}
+                <strong className="text-cyan-400">{compiledPreviewGenomes.length}</strong> génomes valides
+              </div>
+            </div>
+
+            {studioTab === 'visual' ? (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Left Column: Arena, Physics, Learning Track & Piste 3 */}
+                <div className="bg-[#111827] border border-slate-800 p-5 space-y-5">
+                  <h2 className="text-sm font-semibold text-slate-100 border-b border-slate-800 pb-2">
+                    Arène, Lois Physiques & Décompte Piste 3
+                  </h2>
+
+                  <div className="space-y-3 text-xs">
+                    <div>
+                      <label className="block text-slate-400 mb-1">Identifiant de Famille</label>
+                      <input
+                        type="text"
+                        value={activeFamily.family_id}
+                        onChange={(e) =>
+                          setActiveFamily({ ...activeFamily, family_id: e.target.value })
+                        }
+                        className="w-full bg-slate-950 border border-slate-800 px-3 py-1.5 font-mono text-slate-100"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-slate-400 mb-1">Mode Fin de Piste</label>
+                        <select
+                          value={
+                            typeof activeFamily.arena.end_of_track_mode === 'string'
+                              ? activeFamily.arena.end_of_track_mode
+                              : activeFamily.arena.end_of_track_mode.$sweep[0]
+                          }
+                          onChange={(e) =>
+                            setActiveFamily({
+                              ...activeFamily,
+                              arena: { ...activeFamily.arena, end_of_track_mode: e.target.value },
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-slate-800 px-2.5 py-1.5 font-mono text-slate-100"
+                        >
+                          {END_OF_TRACK_MODES.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-400 mb-1">Loi de Casse (Break Rule)</label>
+                        <select
+                          value={
+                            typeof activeFamily.machines_physics.break_rule === 'string'
+                              ? activeFamily.machines_physics.break_rule
+                              : activeFamily.machines_physics.break_rule.$sweep[0]
+                          }
+                          onChange={(e) =>
+                            setActiveFamily({
+                              ...activeFamily,
+                              machines_physics: {
+                                ...activeFamily.machines_physics,
+                                break_rule: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-slate-800 px-2.5 py-1.5 font-mono text-slate-100"
+                        >
+                          {BREAK_RULES.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-slate-400 mb-1">Pénalité de Casse</label>
+                        <select
+                          value={
+                            typeof activeFamily.machines_physics.break_penalty === 'string'
+                              ? activeFamily.machines_physics.break_penalty
+                              : activeFamily.machines_physics.break_penalty.$sweep[0]
+                          }
+                          onChange={(e) =>
+                            setActiveFamily({
+                              ...activeFamily,
+                              machines_physics: {
+                                ...activeFamily.machines_physics,
+                                break_penalty: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-slate-800 px-2.5 py-1.5 font-mono text-slate-100"
+                        >
+                          {BREAK_PENALTIES.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-400 mb-1">Élan Mécanique (Status +1)</label>
+                        <select
+                          value={
+                            typeof activeFamily.machines_physics.momentum_rule === 'string'
+                              ? activeFamily.machines_physics.momentum_rule
+                              : activeFamily.machines_physics.momentum_rule.$sweep[0]
+                          }
+                          onChange={(e) =>
+                            setActiveFamily({
+                              ...activeFamily,
+                              machines_physics: {
+                                ...activeFamily.machines_physics,
+                                momentum_rule: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-slate-800 px-2.5 py-1.5 font-mono text-slate-100"
+                        >
+                          {MOMENTUM_RULES.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-slate-400 mb-1">Déclencheur Piste 2D6</label>
+                        <select
+                          value={
+                            typeof activeFamily.learning_track.eval_trigger_mode === 'string'
+                              ? activeFamily.learning_track.eval_trigger_mode
+                              : activeFamily.learning_track.eval_trigger_mode.$sweep[0]
+                          }
+                          onChange={(e) =>
+                            setActiveFamily({
+                              ...activeFamily,
+                              learning_track: {
+                                ...activeFamily.learning_track,
+                                eval_trigger_mode: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-slate-800 px-2.5 py-1.5 font-mono text-slate-100"
+                        >
+                          {EVAL_TRIGGER_MODES.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-400 mb-1">Opérateur Piste 2D6</label>
+                        <select
+                          value={
+                            typeof activeFamily.learning_track.geom_move_mode === 'string'
+                              ? activeFamily.learning_track.geom_move_mode
+                              : activeFamily.learning_track.geom_move_mode.$sweep[0]
+                          }
+                          onChange={(e) =>
+                            setActiveFamily({
+                              ...activeFamily,
+                              learning_track: {
+                                ...activeFamily.learning_track,
+                                geom_move_mode: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-slate-800 px-2.5 py-1.5 font-mono text-slate-100"
+                        >
+                          {GEOM_MOVE_MODES.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-slate-400 mb-1">
+                        Mode de Redressement Final des Souches (Système Piste 3)
+                      </label>
+                      <select
+                        value={
+                          typeof activeFamily.scoring.regen_mode === 'string'
+                            ? activeFamily.scoring.regen_mode
+                            : activeFamily.scoring.regen_mode.$sweep[0]
+                        }
+                        onChange={(e) =>
+                          setActiveFamily({
+                            ...activeFamily,
+                            scoring: { ...activeFamily.scoring, regen_mode: e.target.value },
+                          })
+                        }
+                        className="w-full bg-slate-950 border border-slate-800 px-2.5 py-1.5 font-mono text-emerald-300"
+                      >
+                        {REGEN_MODES.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right 2 Columns: Visual Tactics & Slots Builder */}
+                <div className="lg:col-span-2 bg-[#111827] border border-slate-800 p-5 space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                    <h2 className="text-sm font-semibold text-slate-100">
+                      Séquences Conditionnelles des Tactiques (18 Capteurs × 9 Verbes Primitifs)
+                    </h2>
+                    <span className="text-xs font-mono text-slate-400">
+                      {activeFamily.tactics.length} Tactiques définies
+                    </span>
+                  </div>
+
+                  <div className="space-y-4 max-h-[540px] overflow-y-auto pr-1">
+                    {activeFamily.tactics.map((tac, tIdx) => (
+                      <div key={tac.id} className="bg-slate-950 border border-slate-800 p-4 space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-2">
+                          <div className="flex items-center gap-3">
+                            <span className="font-mono text-xs font-bold text-slate-100">
+                              {tac.id}
+                            </span>
+                            <span className="text-xs text-slate-400">·</span>
+                            <select
+                              value={tac.machine}
+                              onChange={(e) => {
+                                const next = structuredClone(activeFamily);
+                                next.tactics[tIdx].machine = e.target.value as
+                                  | 'ABATTEUSE'
+                                  | 'BULLDOZER';
+                                setActiveFamily(next);
+                              }}
+                              className="bg-[#111827] border border-slate-800 px-2 py-1 text-xs font-mono text-emerald-400"
+                            >
+                              <option value="ABATTEUSE">Machine : ABATTEUSE</option>
+                              <option value="BULLDOZER">Machine : BULLDOZER</option>
+                            </select>
+                          </div>
+
+                          <button
+                            onClick={() => {
+                              if (tac.slots.length >= 4) return;
+                              const next = structuredClone(activeFamily);
+                              next.tactics[tIdx].slots.push({
+                                cond1: ['TARGETS_CURR', '>=', 1],
+                                if_true: [tac.machine === 'BULLDOZER' ? 'BULLDOZE' : 'CUT', 1, 0],
+                                if_false: ['NONE', 0, 0],
+                                parry_mode: 'CANCEL_SLOT_ONLY',
+                              });
+                              setActiveFamily(next);
+                            }}
+                            disabled={tac.slots.length >= 4}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-mono bg-[#111827] hover:bg-slate-800 disabled:opacity-40 text-slate-200 border border-slate-800 cursor-pointer"
+                          >
+                            <Plus className="w-3 h-3" /> Ajouter Slot ({tac.slots.length}/4)
+                          </button>
+                        </div>
+
+                        <div className="space-y-2">
+                          {tac.slots.map((slot, sIdx) => {
+                            const c1Val =
+                              typeof slot.cond1[2] === 'number'
+                                ? slot.cond1[2]
+                                : slot.cond1[2].$sweep[0];
+                            const actTrue = Array.isArray(slot.if_true)
+                              ? slot.if_true
+                              : slot.if_true.$sweep[0];
+                            const actFalse = Array.isArray(slot.if_false)
+                              ? slot.if_false
+                              : slot.if_false.$sweep[0];
+                            const pMode =
+                              typeof slot.parry_mode === 'string'
+                                ? slot.parry_mode
+                                : slot.parry_mode.$sweep[0];
+
+                            return (
+                              <div
+                                key={sIdx}
+                                className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center bg-[#111827] border border-slate-800/90 p-2.5 text-xs font-mono"
+                              >
+                                <div className="md:col-span-1 text-slate-400 font-bold">
+                                  Slot {sIdx + 1}
+                                </div>
+
+                                {/* Condition 1 */}
+                                <div className="md:col-span-4 flex items-center gap-1">
+                                  <span className="text-slate-400">SI</span>
+                                  <select
+                                    value={slot.cond1[0]}
+                                    onChange={(e) => {
+                                      const next = structuredClone(activeFamily);
+                                      next.tactics[tIdx].slots[sIdx].cond1[0] = e.target.value;
+                                      setActiveFamily(next);
+                                    }}
+                                    className="bg-slate-950 border border-slate-800 px-1.5 py-1 text-[11px] text-cyan-300 w-full"
+                                  >
+                                    {SENSORS.map((s) => (
+                                      <option key={s.code} value={s.code}>
+                                        {s.code} (+{s.cognitiveCost})
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <select
+                                    value={slot.cond1[1]}
+                                    onChange={(e) => {
+                                      const next = structuredClone(activeFamily);
+                                      next.tactics[tIdx].slots[sIdx].cond1[1] = e.target.value;
+                                      setActiveFamily(next);
+                                    }}
+                                    className="bg-slate-950 border border-slate-800 px-1 py-1 text-[11px] text-slate-200"
+                                  >
+                                    {COMP_OPS.map((op) => (
+                                      <option key={op} value={op}>
+                                        {op}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <input
+                                    type="number"
+                                    value={c1Val}
+                                    onChange={(e) => {
+                                      const next = structuredClone(activeFamily);
+                                      next.tactics[tIdx].slots[sIdx].cond1[2] = Number(
+                                        e.target.value
+                                      );
+                                      setActiveFamily(next);
+                                    }}
+                                    className="w-12 bg-slate-950 border border-slate-800 px-1.5 py-1 text-[11px] text-slate-100 text-center"
+                                  />
+                                </div>
+
+                                {/* If True Verb */}
+                                <div className="md:col-span-3 flex items-center gap-1">
+                                  <span className="text-emerald-400">→</span>
+                                  <select
+                                    value={actTrue[0]}
+                                    onChange={(e) => {
+                                      const next = structuredClone(activeFamily);
+                                      next.tactics[tIdx].slots[sIdx].if_true = [
+                                        e.target.value,
+                                        actTrue[1],
+                                        actTrue[2],
+                                      ];
+                                      setActiveFamily(next);
+                                    }}
+                                    className="bg-slate-950 border border-slate-800 px-1.5 py-1 text-[11px] text-emerald-300 w-full"
+                                  >
+                                    {VERBS.map((v) => (
+                                      <option key={v.code} value={v.code}>
+                                        {v.code}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={4}
+                                    value={actTrue[1]}
+                                    onChange={(e) => {
+                                      const next = structuredClone(activeFamily);
+                                      next.tactics[tIdx].slots[sIdx].if_true = [
+                                        actTrue[0],
+                                        Number(e.target.value),
+                                        actTrue[2],
+                                      ];
+                                      setActiveFamily(next);
+                                    }}
+                                    title="Quantité"
+                                    className="w-10 bg-slate-950 border border-slate-800 px-1 py-1 text-[11px] text-center"
+                                  />
+                                </div>
+
+                                {/* If False Verb */}
+                                <div className="md:col-span-2 flex items-center gap-1">
+                                  <span className="text-amber-400">Sinon</span>
+                                  <select
+                                    value={actFalse[0]}
+                                    onChange={(e) => {
+                                      const next = structuredClone(activeFamily);
+                                      next.tactics[tIdx].slots[sIdx].if_false = [
+                                        e.target.value,
+                                        1,
+                                        0,
+                                      ];
+                                      setActiveFamily(next);
+                                    }}
+                                    className="bg-slate-950 border border-slate-800 px-1.5 py-1 text-[11px] text-amber-300 w-full"
+                                  >
+                                    {VERBS.map((v) => (
+                                      <option key={v.code} value={v.code}>
+                                        {v.code}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+
+                                {/* Parry Mode & Delete */}
+                                <div className="md:col-span-2 flex items-center justify-between gap-1">
+                                  <select
+                                    value={pMode}
+                                    onChange={(e) => {
+                                      const next = structuredClone(activeFamily);
+                                      next.tactics[tIdx].slots[sIdx].parry_mode = e.target.value;
+                                      setActiveFamily(next);
+                                    }}
+                                    className="bg-slate-950 border border-slate-800 px-1 py-1 text-[10px] text-slate-300 w-full"
+                                  >
+                                    {PARRY_MODES.map((pm) => (
+                                      <option key={pm} value={pm}>
+                                        {pm.replace('CANCEL_', '')}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  {tac.slots.length > 1 && (
+                                    <button
+                                      onClick={() => {
+                                        const next = structuredClone(activeFamily);
+                                        next.tactics[tIdx].slots.splice(sIdx, 1);
+                                        setActiveFamily(next);
+                                      }}
+                                      className="p-1 text-slate-500 hover:text-rose-400 cursor-pointer"
+                                      title="Supprimer ce Slot"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              /* Declarative JSON/YAML Editor */
+              <div className="bg-[#111827] border border-slate-800 p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-slate-400">
+                    Modifiez directement la spécification déclarative de Niveau 2 (supporte{' '}
+                    <code className="text-emerald-400">{`{"$sweep": [...]}`}</code> sur toute clé).
+                  </span>
+                  <button
+                    onClick={() => {
+                      try {
+                        const parsed = JSON.parse(codeText) as FamilySpecDSL;
+                        setActiveFamily(parsed);
+                        setCodeError(null);
+                      } catch (err: any) {
+                        setCodeError(`Erreur JSON : ${err.message}`);
+                      }
+                    }}
+                    className="px-3 py-1.5 text-xs font-semibold bg-emerald-500 text-slate-950 cursor-pointer"
+                  >
+                    Compiler & Appliquer au Studio
+                  </button>
+                </div>
+                {codeError && (
+                  <div className="p-2.5 bg-rose-950/60 border border-rose-500/40 text-xs font-mono text-rose-300">
+                    {codeError}
+                  </div>
+                )}
+                <textarea
+                  value={codeText}
+                  onChange={(e) => setCodeText(e.target.value)}
+                  rows={20}
+                  className="w-full bg-slate-950 border border-slate-800 p-4 font-mono text-xs text-slate-200 leading-relaxed"
+                />
+              </div>
+            )}
+
+            {/* Real-Time Validator Footer */}
+            <div className="bg-[#111827] border border-slate-800 p-4 flex flex-wrap items-center justify-between gap-4 text-xs font-mono tabular-nums">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-emerald-400 font-semibold">
+                  ● Validateur Statique Pré-Simulation : CONFORME
                 </span>
-                <span className="text-stone-400">
-                  Vitesse : <strong className="text-stone-200 font-mono">{progress.speedGamesSec.toLocaleString('fr-FR')} parties/s</strong>
+                <span className="text-slate-500">·</span>
+                <span>
+                  Complexité Syntaxique Statique moyenne (C_règle) :{' '}
+                  <strong className="text-slate-100">
+                    {compiledPreviewGenomes[0]?.staticComplexity ?? 1.2} op.
+                  </strong>
                 </span>
-                <span className="text-stone-400">
-                  Temps : <strong className="text-stone-200 font-mono">{progress.elapsedSec.toFixed(2)} s</strong>
+                <span className="text-slate-500">·</span>
+                <span>
+                  Verbes atteignables vérifiés : <strong className="text-slate-200">CUT, BULLDOZE, ADVANCE</strong>
                 </span>
               </div>
-              <div className="w-48 h-2 bg-stone-800 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-emerald-500 transition-all duration-150"
-                  style={{ width: `${Math.min(100, (100 * progress.done) / Math.max(1, progress.total))}%` }}
-                />
+              <button
+                onClick={() => setActiveView('config')}
+                className="px-4 py-2 text-xs font-sans font-semibold bg-slate-800 hover:bg-slate-700 text-slate-100 cursor-pointer"
+              >
+                Passer au Configurateur de Campagne →
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================
+            VUE 2 — CONFIGURATEUR DE CAMPAGNE, BOTS & PONDÉRATIONS
+           =================================================================== */}
+        {activeView === 'config' && (
+          <div className="space-y-6">
+            <div className="bg-[#111827] border border-slate-800 p-5">
+              <h1 className="text-xl font-bold text-slate-100">
+                02. Configurateur de Campagne, Banc des 7 Bots & Pondérations Pareto 4D
+              </h1>
+              <p className="text-xs text-slate-400 mt-1">
+                Choisissez entre le Balayage Cartésien Multi-Fidélité à 3 étages (Successive Halving) et l&apos;Algorithme Évolutionnaire Hybride NSGA-II + MAP-Elites (800 niches écologiques).
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Exploration Engine Selection */}
+              <div className="bg-[#111827] border border-slate-800 p-5 space-y-5">
+                <h2 className="text-sm font-semibold text-slate-100 border-b border-slate-800 pb-2">
+                  1. Choix du Moteur d&apos;Exploration (Bloc 5)
+                </h2>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => setExplorationMode('grid_sh')}
+                    className={`p-3.5 text-left border transition cursor-pointer ${
+                      explorationMode === 'grid_sh'
+                        ? 'bg-emerald-500/10 border-emerald-500 text-slate-100'
+                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <div className="text-xs font-bold text-emerald-400">
+                      Mode A · Grille Cartésienne + Successive Halving
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      Tamisage à 3 étages (Rung 1: 100%, Rung 2: Top 25%, Rung 3: Top 5% & Pareto). Accélération 11,48×.
+                    </p>
+                  </button>
+
+                  <button
+                    onClick={() => setExplorationMode('genetic_qd')}
+                    className={`p-3.5 text-left border transition cursor-pointer ${
+                      explorationMode === 'genetic_qd'
+                        ? 'bg-cyan-500/10 border-cyan-500 text-slate-100'
+                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <div className="text-xs font-bold text-cyan-400">
+                      Mode B · Génétique Hybride NSGA-II + MAP-Elites
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      Croisement par bloc, Greffe de Slot, Élagage d&apos;Occam et illumination des 800 niches écologiques.
+                    </p>
+                  </button>
+                </div>
+
+                {explorationMode === 'grid_sh' ? (
+                  <div className="space-y-3 pt-2 text-xs">
+                    <label className="flex items-center justify-between bg-slate-950 border border-slate-800 p-3 cursor-pointer">
+                      <span>Activer l&apos;Entonnoir Multi-Fidélité à 3 Étages (Rungs 1 → 2 → 3)</span>
+                      <input
+                        type="checkbox"
+                        checked={useMultiFidelitySh}
+                        onChange={(e) => setUseMultiFidelitySh(e.target.checked)}
+                        className="accent-emerald-500"
+                      />
+                    </label>
+                    <div className="bg-slate-950 border border-slate-800 p-3 flex items-center justify-between">
+                      <span>Budget Monte-Carlo de base (Étage 1 / Bot)</span>
+                      <select
+                        value={scaleGamesFactor}
+                        onChange={(e) => setScaleGamesFactor(Number(e.target.value))}
+                        className="bg-[#111827] border border-slate-800 px-2.5 py-1 font-mono text-slate-100"
+                      >
+                        <option value={15}>15 parties/bot (Rapide Web)</option>
+                        <option value={30}>30 parties/bot (Équilibré)</option>
+                        <option value={60}>60 parties/bot (Haute précision)</option>
+                      </select>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-3 pt-2 text-xs">
+                    <div className="bg-slate-950 border border-slate-800 p-3">
+                      <label className="block text-slate-400 mb-1">Population P</label>
+                      <select
+                        value={gaPopSize}
+                        onChange={(e) => setGaPopSize(Number(e.target.value))}
+                        className="w-full bg-[#111827] border border-slate-800 px-2 py-1 font-mono text-slate-100"
+                      >
+                        <option value={24}>24 individus</option>
+                        <option value={36}>36 individus</option>
+                        <option value={60}>60 individus</option>
+                      </select>
+                    </div>
+                    <div className="bg-slate-950 border border-slate-800 p-3">
+                      <label className="block text-slate-400 mb-1">Générations G</label>
+                      <select
+                        value={gaGenerations}
+                        onChange={(e) => setGaGenerations(Number(e.target.value))}
+                        className="w-full bg-[#111827] border border-slate-800 px-2 py-1 font-mono text-slate-100"
+                      >
+                        <option value={4}>4 générations</option>
+                        <option value={6}>6 générations</option>
+                        <option value={10}>10 générations</option>
+                      </select>
+                    </div>
+                    <div className="bg-slate-950 border border-slate-800 p-3">
+                      <label className="block text-slate-400 mb-1">Plafond C_règle</label>
+                      <input
+                        type="number"
+                        step={0.5}
+                        min={1.5}
+                        max={8.0}
+                        value={maxAllowedComplexity}
+                        onChange={(e) => setMaxAllowedComplexity(Number(e.target.value))}
+                        className="w-full bg-[#111827] border border-slate-800 px-2 py-1 font-mono text-slate-100"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Tables & Effort Rates */}
+                <div className="border-t border-slate-800 pt-4 grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label className="block text-slate-400 mb-1">Tailles de Table (J joueurs)</label>
+                    <select
+                      value={playerCounts.join(',')}
+                      onChange={(e) => setPlayerCounts(e.target.value.split(',').map(Number))}
+                      className="w-full bg-slate-950 border border-slate-800 px-2.5 py-1.5 font-mono text-slate-100"
+                    >
+                      <option value="4">4 joueurs uniquement</option>
+                      <option value="3,4,5">3, 4 et 5 joueurs</option>
+                      <option value="3,4,5,6">3, 4, 5 et 6 joueurs (Complet)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-slate-400 mb-1">Paliers d&apos;Effort Iso-Quota (P̄)</label>
+                    <select
+                      value={effortRates.join(',')}
+                      onChange={(e) => setEffortRates(e.target.value.split(',').map(Number))}
+                      className="w-full bg-slate-950 border border-slate-800 px-2.5 py-1.5 font-mono text-slate-100"
+                    >
+                      <option value="0.5">50% (Nominal)</option>
+                      <option value="0.3,0.5,0.7">30%, 50%, 70% (Complet)</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Interactive Objective Weights (Live Recalculation) */}
+              <div className="bg-[#111827] border border-slate-800 p-5 space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                  <h2 className="text-sm font-semibold text-slate-100">
+                    2. Pondération Interactive des 4 Métriques (Recalcul à la Volée)
+                  </h2>
+                  <span className="text-xs font-mono text-emerald-400">
+                    Somme normalisée = 1.00
+                  </span>
+                </div>
+
+                <div className="space-y-3 text-xs">
+                  {[
+                    {
+                      key: 'w1_maitrise' as const,
+                      label: 'w1 · M1_Maîtrise (Gradient de compétence, SNR, τ_K de Kendall)',
+                      val: weights.w1_maitrise,
+                    },
+                    {
+                      key: 'w2_adaptation' as const,
+                      label: 'w2 · M2_Adaptation (Plasticité Jensen-Shannon D_JS, TVD, Anti-Martingale)',
+                      val: weights.w2_adaptation,
+                    },
+                    {
+                      key: 'w3_tension' as const,
+                      label: 'w3 · M3_Tension (Fenêtre 60-80%, Entropie de Shannon H_3 des 3 états)',
+                      val: weights.w3_tension,
+                    },
+                    {
+                      key: 'w4_simplicite' as const,
+                      label: 'w4 · M4_Simplicité (Gestes M_phys, Opérations C_cog, Complexité C_règle)',
+                      val: weights.w4_simplicite,
+                    },
+                  ].map((item) => (
+                    <div key={item.key} className="bg-slate-950 border border-slate-800 p-3 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-200 font-medium">{item.label}</span>
+                        <span className="font-mono tabular-nums text-emerald-400 font-bold">
+                          {(item.val * 100).toFixed(0)} %
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0.05}
+                        max={0.7}
+                        step={0.05}
+                        value={item.val}
+                        onChange={(e) => handleWeightChange(item.key, Number(e.target.value))}
+                        className="w-full accent-emerald-500 cursor-pointer"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* The 7 Autonomous Bots Reference Table */}
+            <div className="bg-[#111827] border border-slate-800 p-5 space-y-3">
+              <h2 className="text-sm font-semibold text-slate-100">
+                3. Banc des 7 Bots Joueurs Autonomes (Iso-Effort + Common Random Numbers)
+              </h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+                {ALL_BOTS_V2.map((bot) => (
+                  <div key={bot.code} className="bg-slate-950 border border-slate-800 p-3 space-y-1">
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <span className="text-emerald-400 font-bold">{bot.code}</span>
+                      <span className="text-slate-400">Niveau {bot.level}</span>
+                    </div>
+                    <div className="text-xs font-semibold text-slate-200">{bot.name}</div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">{bot.description}</p>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
         )}
-      </header>
 
-      <main className="max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 flex-1 space-y-6">
-        {/* Top Unit Tests & Calibration Controls Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          {/* Unit Tests Verification Card */}
-          <div className="bg-stone-900/70 border border-stone-800 rounded-xl p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-emerald-400">
-                <CheckCircle2 className="w-4 h-4" />
-                Invariants Physiques & Tests Unitaires
+        {/* ===================================================================
+            VUE 3 — CONSOLE D'EXÉCUTION & TÉLÉMÉTRIE VM EN DIRECT
+           =================================================================== */}
+        {activeView === 'console' && (
+          <div className="space-y-6">
+            <div className="bg-[#111827] border border-slate-800 p-5 flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h1 className="text-xl font-bold text-slate-100">
+                  03. Console d&apos;Exécution Multi-Fidélité & Télémétrie VM
+                </h1>
+                <p className="text-xs text-slate-400 mt-1">
+                  Pilotage des lots Monte-Carlo, suivi de l&apos;entonnoir Successive Halving (Rungs 1-2-3), progression MAP-Elites et export du bundle Python/Numba pour votre VM Oracle 16 vCPUs.
+                </p>
               </div>
-              <span className="text-[11px] font-mono text-stone-400">tests/test_engine.py</span>
-            </div>
-            <div className="space-y-2">
-              {unitTests.map((t, idx) => (
-                <div
-                  key={idx}
-                  className="p-2.5 rounded-lg bg-stone-950/70 border border-stone-800/80 flex items-start justify-between gap-2"
-                >
-                  <div>
-                    <div className="text-xs font-medium text-stone-200">{t.name}</div>
-                    <div className="text-[11px] font-mono text-stone-400 mt-0.5">{t.detail}</div>
-                  </div>
-                  <span
-                    className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase ${
-                      t.passed
-                        ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                        : 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
-                    }`}
+
+              {/* Execution Controls */}
+              <div className="flex flex-wrap items-center gap-2">
+                {!isRunning ? (
+                  <button
+                    onClick={() => runCampaignExecution(explorationMode, activeFamily)}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-slate-950 cursor-pointer whitespace-nowrap shrink-0"
                   >
-                    {t.passed ? 'OK' : 'ERR'}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
+                    <Play className="w-3.5 h-3.5" />
+                    Lancer ({explorationMode === 'grid_sh' ? 'Grille 3 Étages' : 'NSGA-II + MAP-Elites'})
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => {
+                        pauseRef.current = !pauseRef.current;
+                        setIsPaused(pauseRef.current);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-amber-500 text-slate-950 cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <Pause className="w-3.5 h-3.5" />
+                      {isPaused ? 'Reprendre' : 'Pause (Fin de lot)'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        stopRef.current = true;
+                        setIsRunning(false);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-rose-500 text-slate-950 cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <Square className="w-3.5 h-3.5" />
+                      Arrêter
+                    </button>
+                  </>
+                )}
 
-          {/* Monte-Carlo & Weights Configuration Card */}
-          <div className="lg:col-span-2 bg-stone-900/70 border border-stone-800 rounded-xl p-4 flex flex-col justify-between space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-amber-400">
-                <Sliders className="w-4 h-4" />
-                Paramètres de Simulation Monte-Carlo & Pondération Pareto 4D
-              </div>
-              <span className="text-xs text-stone-400">
-                6 Doctrines Iso-Effort (D0 à D5) × Common Random Numbers
-              </span>
-            </div>
+                {hasCheckpoint && !isRunning && (
+                  <button
+                    onClick={() => runCampaignExecution(explorationMode, activeFamily)}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium bg-slate-950 hover:bg-slate-800 text-slate-200 border border-slate-800 cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Reprendre depuis Checkpoint
+                  </button>
+                )}
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div className="bg-stone-950/70 border border-stone-800 rounded-lg p-2.5">
-                <label className="block text-[11px] text-stone-400">Parties MC / Doctrine</label>
-                <select
-                  value={nGames}
-                  onChange={(e) => setNGames(Number(e.target.value))}
-                  className="mt-1 w-full bg-stone-900 border border-stone-700 rounded px-2 py-1 text-xs font-mono text-white"
+                <button
+                  onClick={() =>
+                    downloadBlob(
+                      'foret_automate_lab_v2_oci.py',
+                      generateOciPythonBundleScript(activeFamily, population),
+                      'text/x-python;charset=utf-8'
+                    )
+                  }
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-cyan-500 hover:bg-cyan-400 text-slate-950 cursor-pointer whitespace-nowrap shrink-0"
                 >
-                  <option value={15}>15 (Ultra-rapide)</option>
-                  <option value={30}>30 (Pilote)</option>
-                  <option value={75}>75 (Précis)</option>
-                  <option value={200}>200 (Haute précision)</option>
-                </select>
-              </div>
-
-              <div className="bg-stone-950/70 border border-stone-800 rounded-lg p-2.5">
-                <label className="block text-[11px] text-stone-400">Tailles de table (J)</label>
-                <select
-                  value={playerCounts.join(',')}
-                  onChange={(e) => setPlayerCounts(e.target.value.split(',').map(Number))}
-                  className="mt-1 w-full bg-stone-900 border border-stone-700 rounded px-2 py-1 text-xs font-mono text-white"
-                >
-                  <option value="4">4 joueurs (Standard)</option>
-                  <option value="3,4,5">3, 4, 5 joueurs</option>
-                  <option value="3,4,5,6">3, 4, 5, 6 joueurs (Complet)</option>
-                </select>
-              </div>
-
-              <div className="bg-stone-950/70 border border-stone-800 rounded-lg p-2.5">
-                <label className="block text-[11px] text-stone-400">Quota d&apos;effort (P̄)</label>
-                <select
-                  value={effortRates.join(',')}
-                  onChange={(e) => setEffortRates(e.target.value.split(',').map(Number))}
-                  className="mt-1 w-full bg-stone-900 border border-stone-700 rounded px-2 py-1 text-xs font-mono text-white"
-                >
-                  <option value="0.5">50% (Nominal)</option>
-                  <option value="0.3,0.5,0.7">30%, 50%, 70% (Multi-effort)</option>
-                </select>
-              </div>
-
-              <div className="bg-stone-950/70 border border-stone-800 rounded-lg p-2.5">
-                <label className="block text-[11px] text-stone-400">Poids M1 / M2 / M3 / M4</label>
-                <div className="mt-1 text-xs font-mono text-emerald-300">
-                  {(weights.w_maitrise * 100).toFixed(0)}% / {(weights.w_adaptation * 100).toFixed(0)}% /{' '}
-                  {(weights.w_tension * 100).toFixed(0)}% / {(weights.w_simplicite * 100).toFixed(0)}%
-                </div>
+                  <Terminal className="w-3.5 h-3.5" />
+                  Exporter Bundle Python/Numba OCI (16 vCPUs)
+                </button>
               </div>
             </div>
 
-            {/* Champion Banner */}
-            {top1 && (
-              <div className="p-3 rounded-xl bg-gradient-to-r from-emerald-950/60 via-stone-900 to-stone-900 border border-emerald-500/30 flex flex-wrap items-center justify-between gap-4">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-300">
-                    <Trophy className="w-5 h-5" />
+            {/* Live Progress Bar & Funnel Metrics */}
+            <div className="bg-[#111827] border border-slate-800 p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono tabular-nums">
+                <span className="text-emerald-400 font-semibold">{telemetry.phaseLabel}</span>
+                <span>
+                  Progression : {telemetry.doneInPhase} / {telemetry.totalInPhase} automates (
+                  {Math.round(
+                    (100 * telemetry.doneInPhase) / Math.max(1, telemetry.totalInPhase)
+                  )}
+                  %)
+                </span>
+              </div>
+
+              <div className="w-full h-3 bg-slate-950 border border-slate-800 overflow-hidden">
+                <div
+                  className="h-full bg-emerald-500 transition-all duration-150"
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      (100 * telemetry.doneInPhase) / Math.max(1, telemetry.totalInPhase)
+                    )}%`,
+                  }}
+                />
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-2 font-mono tabular-nums">
+                <div className="bg-slate-950 border border-slate-800 p-3.5">
+                  <div className="text-[11px] text-slate-400">PARTIES SIMULÉES (CRN)</div>
+                  <div className="text-2xl font-bold text-slate-100 mt-1">
+                    {telemetry.totalGamesSimulated.toLocaleString('fr-FR')}
                   </div>
+                  <div className="text-xs text-emerald-400 mt-0.5">
+                    {telemetry.speedGamesPerSec.toLocaleString('fr-FR')} parties / s
+                  </div>
+                </div>
+
+                <div className="bg-slate-950 border border-slate-800 p-3.5">
+                  <div className="text-[11px] text-slate-400">ENTONNOIR SUCCESSIVE HALVING</div>
+                  <div className="text-2xl font-bold text-slate-100 mt-1">
+                    {telemetry.rung1Count} → {telemetry.rung2Survivors} → {telemetry.rung3Certified}
+                  </div>
+                  <div className="text-xs text-slate-400 mt-0.5">
+                    Rung 1 (100%) · Rung 2 (25%) · Rung 3 (Top)
+                  </div>
+                </div>
+
+                <div className="bg-slate-950 border border-slate-800 p-3.5">
+                  <div className="text-[11px] text-slate-400">ARCHIVE MAP-ELITES (10×10×8)</div>
+                  <div className="text-2xl font-bold text-cyan-400 mt-1">
+                    {mapElitesArchive.size}{' '}
+                    <span className="text-xs text-slate-400 font-normal">/ 800 niches</span>
+                  </div>
+                  <div className="text-xs text-slate-400 mt-0.5">
+                    Taux d&apos;illumination : {((100 * mapElitesArchive.size) / 800).toFixed(1)}%
+                  </div>
+                </div>
+
+                <div className="bg-slate-950 border border-slate-800 p-3.5">
+                  <div className="text-[11px] text-slate-400">CHAMPION ACTUEL (#1)</div>
+                  <div className="text-2xl font-bold text-emerald-400 mt-1">
+                    {population[0]?.scoreGlobal.toFixed(2) ?? '—'}{' '}
+                    <span className="text-xs text-slate-400 font-normal">/ 100</span>
+                  </div>
+                  <div className="text-xs text-slate-300 truncate mt-0.5">
+                    {population[0]?.code ?? 'En attente'}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Generation History Table (when running Genetic QD mode) */}
+            {telemetry.generationHistory.length > 0 && (
+              <div className="bg-[#111827] border border-slate-800 p-5 space-y-3">
+                <h2 className="text-sm font-semibold text-slate-100">
+                  Historique de Convergence Évolutionnaire (NSGA-II + MAP-Elites)
+                </h2>
+                <table className="w-full text-left border-collapse text-xs font-mono tabular-nums">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400">
+                      <th className="py-2 px-3">Génération</th>
+                      <th className="py-2 px-3 text-right">Meilleur Score Global</th>
+                      <th className="py-2 px-3 text-right">Moyenne Front Pareto 4D</th>
+                      <th className="py-2 px-3 text-right">Niches MAP-Elites Découvertes</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {telemetry.generationHistory.map((g) => (
+                      <tr key={g.gen}>
+                        <td className="py-2 px-3 text-slate-200 font-bold">Génération #{g.gen}</td>
+                        <td className="py-2 px-3 text-right text-emerald-400 font-bold">
+                          {g.bestScore.toFixed(2)}
+                        </td>
+                        <td className="py-2 px-3 text-right text-slate-200">
+                          {g.meanPareto.toFixed(2)}
+                        </td>
+                        <td className="py-2 px-3 text-right text-cyan-400">
+                          {g.niches} / 800
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ===================================================================
+            VUE 4 — LABORATOIRE D'ANALYSE, MAP-ELITES & TRADUCTEUR DE RÈGLES
+           =================================================================== */}
+        {activeView === 'lab' && (
+          <div className="space-y-6">
+            {/* Top Sub-Navigation & 1-Click Analytical Exports */}
+            <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => setLabSubTab('ranking')}
+                  className={`px-3.5 py-2 text-xs font-semibold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                    labSubTab === 'ranking'
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'bg-[#111827] text-slate-400 border border-slate-800 hover:text-slate-200'
+                  }`}
+                >
+                  Classement & Front Pareto 4D ({population.length})
+                </button>
+                <button
+                  onClick={() => setLabSubTab('map_elites')}
+                  className={`px-3.5 py-2 text-xs font-semibold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                    labSubTab === 'map_elites'
+                      ? 'bg-cyan-500 text-slate-950'
+                      : 'bg-[#111827] text-slate-400 border border-slate-800 hover:text-slate-200'
+                  }`}
+                >
+                  Carte de Chaleur MAP-Elites ({mapElitesArchive.size} niches)
+                </button>
+                <button
+                  onClick={() => setLabSubTab('sensitivity')}
+                  className={`px-3.5 py-2 text-xs font-semibold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                    labSubTab === 'sensitivity'
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'bg-[#111827] text-slate-400 border border-slate-800 hover:text-slate-200'
+                  }`}
+                >
+                  Sensibilité Marginale V2
+                </button>
+                <button
+                  onClick={() => setLabSubTab('report')}
+                  className={`px-3.5 py-2 text-xs font-semibold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                    labSubTab === 'report'
+                      ? 'bg-emerald-500 text-slate-950'
+                      : 'bg-[#111827] text-slate-400 border border-slate-800 hover:text-slate-200'
+                  }`}
+                >
+                  Bilan Markdown (campaign_report.md)
+                </button>
+              </div>
+
+              {/* 1-Click Exports Bar */}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() =>
+                    downloadBlob('campaign_report.md', fullMarkdownReport, 'text/markdown')
+                  }
+                  className="px-3 py-1.5 text-xs font-medium bg-[#111827] hover:bg-slate-800 text-slate-200 border border-slate-800 cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  campaign_report.md
+                </button>
+                <button
+                  onClick={() =>
+                    downloadBlob(
+                      'variants_ranking.csv',
+                      exportVariantsRankingCsvV2(population),
+                      'text/csv'
+                    )
+                  }
+                  className="px-3 py-1.5 text-xs font-medium bg-[#111827] hover:bg-slate-800 text-slate-200 border border-slate-800 cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  variants_ranking.csv
+                </button>
+                <button
+                  onClick={() =>
+                    downloadBlob(
+                      'map_elites_archive.csv',
+                      exportMapElitesArchiveCsv(mapElitesArchive),
+                      'text/csv'
+                    )
+                  }
+                  className="px-3 py-1.5 text-xs font-medium bg-[#111827] hover:bg-slate-800 text-slate-200 border border-slate-800 cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  map_elites_archive.csv
+                </button>
+                <button
+                  onClick={() =>
+                    downloadBlob(
+                      'sensitivity_analysis.csv',
+                      exportSensitivityCsvV2(sensitivityRows),
+                      'text/csv'
+                    )
+                  }
+                  className="px-3 py-1.5 text-xs font-medium bg-[#111827] hover:bg-slate-800 text-slate-200 border border-slate-800 cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  sensitivity_analysis.csv
+                </button>
+              </div>
+            </div>
+
+            {/* SUB-TAB A: RANKING TABLE OR MAP-ELITES HEATMAP */}
+            {labSubTab === 'ranking' && (
+              <div className="bg-[#111827] border border-slate-800">
+                <div className="p-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                  <div className="relative flex-1 min-w-[240px]">
+                    <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={searchFilter}
+                      onChange={(e) => setSearchFilter(e.target.value)}
+                      placeholder="Filtrer par code d'automate ou famille (ex: G0001, BOUN, FLIP, OCCAM...)"
+                      className="w-full bg-slate-950 border border-slate-800 pl-8 pr-3 py-1.5 text-xs text-slate-200"
+                    />
+                  </div>
+                  <div className="flex items-center gap-4 text-xs">
+                    <label className="inline-flex items-center gap-2 text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={paretoOnlyFilter}
+                        onChange={(e) => setParetoOnlyFilter(e.target.checked)}
+                        className="accent-emerald-500"
+                      />
+                      Front de Pareto 4D uniquement ({paretoCount})
+                    </label>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto max-h-[340px] overflow-y-auto">
+                  <table className="w-full text-left border-collapse text-xs font-mono tabular-nums">
+                    <thead className="sticky top-0 bg-slate-950 border-b border-slate-800 text-slate-400 text-[11px]">
+                      <tr>
+                        <th className="py-2.5 px-3">Rang</th>
+                        <th className="py-2.5 px-3">Code Automate</th>
+                        <th className="py-2.5 px-3 text-center">Étage</th>
+                        <th className="py-2.5 px-3 text-right">Score Global</th>
+                        <th className="py-2.5 px-3 text-right">M1 Maîtrise</th>
+                        <th className="py-2.5 px-3 text-right">M2 Adapt.</th>
+                        <th className="py-2.5 px-3 text-right">M3 Tension</th>
+                        <th className="py-2.5 px-3 text-right">M4 Fluidité</th>
+                        <th className="py-2.5 px-3 text-right">SNR / τ_K</th>
+                        <th className="py-2.5 px-3 text-right">D_JS / Marge Nash</th>
+                        <th className="py-2.5 px-3 text-right">H_3 Shannon</th>
+                        <th className="py-2.5 px-3 text-right">C_règle</th>
+                        <th className="py-2.5 px-3 text-center">Pareto</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60">
+                      {filteredPopulation.slice(0, 80).map((item) => {
+                        const isSel = selectedAutomaton?.id === item.id;
+                        return (
+                          <tr
+                            key={item.id}
+                            onClick={() => setSelectedAutomaton(item)}
+                            className={`transition cursor-pointer ${
+                              isSel
+                                ? 'bg-emerald-950/40 text-slate-100'
+                                : 'hover:bg-slate-800/50 text-slate-300'
+                            }`}
+                          >
+                            <td className="py-2 px-3 font-bold text-slate-400">
+                              #{item.rangGlobal}
+                            </td>
+                            <td className="py-2 px-3 font-semibold text-slate-100">
+                              {item.code}
+                            </td>
+                            <td className="py-2 px-3 text-center text-slate-400">
+                              R{item.rungReached}
+                            </td>
+                            <td className="py-2 px-3 text-right font-bold text-emerald-400">
+                              {item.scoreGlobal.toFixed(2)}
+                            </td>
+                            <td className="py-2 px-3 text-right">{item.M1_maitrise.toFixed(1)}</td>
+                            <td className="py-2 px-3 text-right">
+                              {item.M2_adaptation.toFixed(1)}
+                            </td>
+                            <td className="py-2 px-3 text-right">{item.M3_tension.toFixed(1)}</td>
+                            <td className="py-2 px-3 text-right">
+                              {item.M4_simplicite.toFixed(1)}
+                            </td>
+                            <td className="py-2 px-3 text-right text-slate-300">
+                              {item.snr.toFixed(2)} / {item.kendallTau.toFixed(2)}
+                            </td>
+                            <td className="py-2 px-3 text-right">
+                              <span className="text-cyan-300">
+                                {item.jensenShannonDjs.toFixed(2)}
+                              </span>{' '}
+                              /{' '}
+                              <span
+                                className={
+                                  item.nashMargin >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                                }
+                              >
+                                {item.nashMargin >= 0
+                                  ? `+${item.nashMargin.toFixed(1)}%`
+                                  : `${item.nashMargin.toFixed(1)}%`}
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 text-right text-amber-300">
+                              {item.shannonEntropyBits.toFixed(2)}b ({item.shannonEntropyNormPct}%)
+                            </td>
+                            <td className="py-2 px-3 text-right text-slate-300">
+                              {item.cRegleStatic.toFixed(2)}
+                            </td>
+                            <td className="py-2 px-3 text-center">
+                              {item.isPareto4D ? (
+                                <span className="text-emerald-400 font-bold">4D</span>
+                              ) : (
+                                <span className="text-slate-600">·</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {labSubTab === 'map_elites' && (
+              <div className="bg-[#111827] border border-slate-800 p-5 space-y-3">
+                <div className="flex items-center justify-between">
                   <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-semibold text-amber-300 uppercase tracking-wider">
-                        Variante #1 Recommandée
-                      </span>
-                      <span className="font-mono text-sm font-bold text-white">{top1.code}</span>
-                      <span className="text-xs font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300">
-                        Score {top1.score_global}/100
-                      </span>
-                    </div>
-                    <p className="text-xs text-stone-300 mt-0.5">
-                      Éligibilité: <strong>{top1.O1_eligibilite}</strong> · Boost:{' '}
-                      <strong>{top1.O2_boost}</strong> · Apprentissage:{' '}
-                      <strong>{top1.O3_apprentissage}</strong> · Piste:{' '}
-                      <strong>{top1.O4_init_piste}</strong> · Topologie:{' '}
-                      <strong>{top1.P1_topologie}</strong> ({top1.P3_duree_tours} tours)
+                    <h2 className="text-sm font-semibold text-slate-100">
+                      Archive Comportementale Illuminée MAP-Elites (Grille 10 × 10 × 8 = 800 Niches)
+                    </h2>
+                    <p className="text-xs text-slate-400">
+                      Cliquez sur une cellule de la grille pour inspecter le champion de ce style de jeu et afficher sa règle humaine ci-dessous.
                     </p>
                   </div>
                 </div>
-                <div className="flex items-center gap-4 text-xs font-mono">
-                  <div>
-                    <span className="text-stone-400 block text-[10px]">M1 Maîtrise</span>
-                    <span className="text-emerald-300 font-bold">{top1.M1_maitrise}</span>
+                <MapElitesHeatmap
+                  archive={mapElitesArchive}
+                  selectedId={selectedAutomaton?.id ?? -1}
+                  activeZ={activeZSlice}
+                  onSelectZ={setActiveZSlice}
+                  onSelectAutomaton={(a) => setSelectedAutomaton(a)}
+                />
+              </div>
+            )}
+
+            {labSubTab === 'sensitivity' && (
+              <div className="bg-[#111827] border border-slate-800 overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs font-mono tabular-nums">
+                  <thead>
+                    <tr className="border-b border-slate-800 bg-slate-950 text-slate-400 text-[11px]">
+                      <th className="py-2.5 px-4">Dimension</th>
+                      <th className="py-2.5 px-4">Modalité</th>
+                      <th className="py-2.5 px-4 text-right">Effectif</th>
+                      <th className="py-2.5 px-4 text-right">Score Global</th>
+                      <th className="py-2.5 px-4 text-right">M1 Maîtrise</th>
+                      <th className="py-2.5 px-4 text-right">M2 Adaptation</th>
+                      <th className="py-2.5 px-4 text-right">M3 Tension</th>
+                      <th className="py-2.5 px-4 text-right">M4 Simplicité</th>
+                      <th className="py-2.5 px-4 text-right">Marge Nash</th>
+                      <th className="py-2.5 px-4 text-right">C_règle Statique</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {sensitivityRows.map((s, idx) => (
+                      <tr key={idx} className="hover:bg-slate-800/40">
+                        <td className="py-2 px-4 text-slate-400">{s.dimension}</td>
+                        <td className="py-2 px-4 text-slate-100 font-semibold">{s.modality}</td>
+                        <td className="py-2 px-4 text-right text-slate-400">{s.count}</td>
+                        <td className="py-2 px-4 text-right text-emerald-400 font-bold">
+                          {s.scoreGlobal.toFixed(2)}
+                        </td>
+                        <td className="py-2 px-4 text-right">{s.M1.toFixed(2)}</td>
+                        <td className="py-2 px-4 text-right">{s.M2.toFixed(2)}</td>
+                        <td className="py-2 px-4 text-right">{s.M3.toFixed(2)}</td>
+                        <td className="py-2 px-4 text-right">{s.M4.toFixed(2)}</td>
+                        <td className="py-2 px-4 text-right text-cyan-300">
+                          {s.nashMargin >= 0 ? `+${s.nashMargin.toFixed(2)}%` : `${s.nashMargin.toFixed(2)}%`}
+                        </td>
+                        <td className="py-2 px-4 text-right text-slate-300">
+                          {s.cRegle.toFixed(2)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {labSubTab === 'report' && (
+              <div className="bg-[#111827] border border-slate-800 p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-slate-400">
+                    Bilan analytique complet incluant le podium Pareto 4D, la matrice des 7 Bots et la traduction en français des règles du Top 5.
+                  </span>
+                  <button
+                    onClick={() =>
+                      downloadBlob('campaign_report.md', fullMarkdownReport, 'text/markdown')
+                    }
+                    className="px-3 py-1.5 text-xs font-semibold bg-emerald-500 text-slate-950 cursor-pointer"
+                  >
+                    Télécharger campaign_report.md
+                  </button>
+                </div>
+                <pre className="bg-slate-950 border border-slate-800 p-4 text-xs font-mono text-slate-200 overflow-x-auto max-h-[420px] overflow-y-auto whitespace-pre-wrap leading-relaxed">
+                  {fullMarkdownReport}
+                </pre>
+              </div>
+            )}
+
+            {/* SELECTED VARIANT INSPECTOR : 3 SYNCHRONIZED CHARTS + HUMAN RULEBOOK TRANSLATOR */}
+            {selectedAutomaton && turnProfile && selectedRulebook && (
+              <div className="space-y-6">
+                {/* 3 Synchronized Charts Row */}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  {/* Chart 1: 7 Bots Profile */}
+                  <div className="bg-[#111827] border border-slate-800 p-5 space-y-3">
+                    <h3 className="text-sm font-semibold text-slate-100 border-b border-slate-800 pb-2">
+                      1. Profil de Réponse des 7 Bots ({selectedAutomaton.code})
+                    </h3>
+                    <BotsResponseChart selected={selectedAutomaton} />
                   </div>
-                  <div>
-                    <span className="text-stone-400 block text-[10px]">M2 Adapt.</span>
-                    <span className="text-sky-300 font-bold">{top1.M2_adaptation}</span>
+
+                  {/* Chart 2: Turn-by-Turn Evolution with Piste 3 Critical Stumps */}
+                  <div className="bg-[#111827] border border-slate-800 p-5 space-y-3">
+                    <h3 className="text-sm font-semibold text-slate-100 border-b border-slate-800 pb-2">
+                      2. Dynamique Temporelle & Souches Piste 3
+                    </h3>
+                    <div className="max-h-[265px] overflow-y-auto">
+                      <TurnByTurnCurveChart profile={turnProfile} />
+                    </div>
                   </div>
-                  <div>
-                    <span className="text-stone-400 block text-[10px]">M3 Tension</span>
-                    <span className="text-amber-300 font-bold">{top1.M3_tension}</span>
+
+                  {/* Chart 3: Radar 4D */}
+                  <div className="bg-[#111827] border border-slate-800 p-5 space-y-3">
+                    <h3 className="text-sm font-semibold text-slate-100 border-b border-slate-800 pb-2">
+                      3. Radar 4D (M1, M2, M3, M4 vs Top #1)
+                    </h3>
+                    <Radar4DChart selected={selectedAutomaton} top3={population.slice(0, 3)} />
                   </div>
-                  <div>
-                    <span className="text-stone-400 block text-[10px]">M4 Fluidité</span>
-                    <span className="text-purple-300 font-bold">{top1.M4_simplicite}</span>
+                </div>
+
+                {/* THE HUMAN RULEBOOK TRANSLATOR (Section 8.4) */}
+                <div className="bg-[#111827] border border-slate-800 p-6 space-y-5">
+                  <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
+                    <div>
+                      <div className="text-xs font-mono text-emerald-400">
+                        TRADUCTEUR AUTOMATIQUE DE GÉNOME (447 INT32 → RÈGLE DE JEU HUMAINE)
+                      </div>
+                      <h2 className="text-lg font-bold text-slate-100 mt-0.5">
+                        {selectedRulebook.title}
+                      </h2>
+                      <div className="text-xs text-slate-400 mt-0.5 font-mono tabular-nums">
+                        Score Global: {selectedAutomaton.scoreGlobal}/100 · Niche MAP-Elites: [
+                        {selectedAutomaton.nicheKey}] · Entropie Shannon:{' '}
+                        {selectedAutomaton.shannonEntropyBits} bits · Charge:{' '}
+                        {selectedAutomaton.mPhysPerTurn} gestes/t & {selectedAutomaton.cCogPerTurn}{' '}
+                        ops/t (C_règle = {selectedAutomaton.cRegleStatic})
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() =>
+                          downloadBlob(
+                            `regle_playtest_${selectedAutomaton.code}.md`,
+                            selectedRulebook.markdown,
+                            'text/markdown'
+                          )
+                        }
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-emerald-500 text-slate-950 cursor-pointer whitespace-nowrap shrink-0"
+                      >
+                        <BookOpen className="w-3.5 h-3.5" />
+                        Télécharger la Fiche Playtest (.md)
+                      </button>
+                      <button
+                        onClick={() =>
+                          downloadBlob(
+                            `${selectedAutomaton.code}.yaml`,
+                            exportGenomeToLevel2Yaml(
+                              selectedAutomaton.genome,
+                              selectedAutomaton.code
+                            ),
+                            'text/yaml'
+                          )
+                        }
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium bg-slate-950 hover:bg-slate-800 text-slate-200 border border-slate-800 cursor-pointer whitespace-nowrap shrink-0"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        Exporter Génome (.yaml Niveau 2)
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 text-sm leading-relaxed">
+                    <div className="space-y-4">
+                      <div>
+                        <h3 className="text-xs font-mono uppercase tracking-wider text-emerald-400 mb-2">
+                          1. Mise en Place & Topologie de l&apos;Arène
+                        </h3>
+                        <ul className="space-y-1.5 text-xs text-slate-300 list-disc pl-4">
+                          {selectedRulebook.setupSection.map((s, i) => (
+                            <li key={i}>{s}</li>
+                          ))}
+                        </ul>
+                      </div>
+
+                      <div>
+                        <h3 className="text-xs font-mono uppercase tracking-wider text-cyan-400 mb-2">
+                          2. Lois Physiques du Tandem (Abatteuse & Bulldozer)
+                        </h3>
+                        <ul className="space-y-1.5 text-xs text-slate-300 list-disc pl-4">
+                          {selectedRulebook.physicsSection.map((s, i) => (
+                            <li key={i}>{s}</li>
+                          ))}
+                        </ul>
+                      </div>
+
+                      <div>
+                        <h3 className="text-xs font-mono uppercase tracking-wider text-amber-400 mb-2">
+                          4. Piste d&apos;Apprentissage 2D6 & 5. Décompte Final Piste 3
+                        </h3>
+                        <ul className="space-y-1.5 text-xs text-slate-300 list-disc pl-4">
+                          {selectedRulebook.learningSection.map((s, i) => (
+                            <li key={`l-${i}`}>{s}</li>
+                          ))}
+                          {selectedRulebook.scoringSection.map((s, i) => (
+                            <li key={`s-${i}`} className="text-emerald-300 font-medium">
+                              {s}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3">
+                      <h3 className="text-xs font-mono uppercase tracking-wider text-slate-200">
+                        3. Effet Exact des Tuiles Tactiques sur Table
+                      </h3>
+                      <div className="space-y-3">
+                        {selectedRulebook.tacticsSection.map((tac, idx) => (
+                          <div
+                            key={idx}
+                            className="bg-slate-950 border border-slate-800 p-3.5 space-y-1.5"
+                          >
+                            <div className="flex items-center justify-between text-xs font-mono">
+                              <span className="font-bold text-slate-100">{tac.name}</span>
+                              <span
+                                className={
+                                  tac.machine === 'BULLDOZER'
+                                    ? 'text-amber-400'
+                                    : 'text-emerald-400'
+                                }
+                              >
+                                Machine : {tac.machine}
+                              </span>
+                            </div>
+                            <ul className="space-y-1 text-xs text-slate-300 font-mono">
+                              {tac.slotsText.map((st, sIdx) => (
+                                <li key={sIdx}>{st}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
             )}
-          </div>
-        </div>
-
-        {/* Navigation Tabs */}
-        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-stone-800 pb-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={() => setActiveTab('podium')}
-              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition cursor-pointer ${
-                activeTab === 'podium'
-                  ? 'bg-emerald-600 text-white'
-                  : 'bg-stone-900 text-stone-400 hover:text-stone-200 border border-stone-800'
-              }`}
-            >
-              <Trophy className="w-4 h-4" />
-              Classement & Front Pareto 4D ({results.length})
-            </button>
-            <button
-              onClick={() => setActiveTab('sensitivity')}
-              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition cursor-pointer ${
-                activeTab === 'sensitivity'
-                  ? 'bg-emerald-600 text-white'
-                  : 'bg-stone-900 text-stone-400 hover:text-stone-200 border border-stone-800'
-              }`}
-            >
-              <BarChart3 className="w-4 h-4" />
-              Sensibilité Marginale (O1..O5 & P1..P3)
-            </button>
-            <button
-              onClick={() => setActiveTab('dynamics')}
-              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition cursor-pointer ${
-                activeTab === 'dynamics'
-                  ? 'bg-emerald-600 text-white'
-                  : 'bg-stone-900 text-stone-400 hover:text-stone-200 border border-stone-800'
-              }`}
-            >
-              <Activity className="w-4 h-4" />
-              Dynamique Temporelle & 6 Doctrines
-            </button>
-            <button
-              onClick={() => setActiveTab('report')}
-              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition cursor-pointer ${
-                activeTab === 'report'
-                  ? 'bg-emerald-600 text-white'
-                  : 'bg-stone-900 text-stone-400 hover:text-stone-200 border border-stone-800'
-              }`}
-            >
-              <FileText className="w-4 h-4" />
-              Bilan Markdown (campaign_report.md)
-            </button>
-          </div>
-
-          <div className="text-xs text-stone-400 font-mono">
-            Front de Pareto 4D : <strong className="text-emerald-400">{paretoCount}</strong> champions non-dominés
-          </div>
-        </div>
-
-        {/* TAB 1: PODIUM & TABLE */}
-        {activeTab === 'podium' && (
-          <div className="space-y-4">
-            {/* Filter Bar */}
-            <div className="bg-stone-900/70 border border-stone-800 rounded-xl p-3 flex flex-wrap items-center gap-3">
-              <div className="relative flex-1 min-w-[200px]">
-                <Search className="w-4 h-4 text-stone-500 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Rechercher un code variante (ex: V0012, Strict, Sur_Place...)"
-                  className="w-full bg-stone-950 border border-stone-800 rounded-lg pl-9 pr-3 py-1.5 text-xs text-stone-200 placeholder-stone-500"
-                />
-              </div>
-
-              <select
-                value={filterO1}
-                onChange={(e) => setFilterO1(e.target.value)}
-                className="bg-stone-950 border border-stone-800 rounded-lg px-2.5 py-1.5 text-xs text-stone-200"
-              >
-                <option value="ALL">O1 Éligibilité : Toutes</option>
-                {Object.keys(O1_MAP).map((k) => (
-                  <option key={k} value={k}>
-                    O1: {k}
-                  </option>
-                ))}
-              </select>
-
-              <select
-                value={filterO2}
-                onChange={(e) => setFilterO2(e.target.value)}
-                className="bg-stone-950 border border-stone-800 rounded-lg px-2.5 py-1.5 text-xs text-stone-200"
-              >
-                <option value="ALL">O2 Boost : Tous</option>
-                {Object.keys(O2_MAP).map((k) => (
-                  <option key={k} value={k}>
-                    O2: {k}
-                  </option>
-                ))}
-              </select>
-
-              <select
-                value={filterO3}
-                onChange={(e) => setFilterO3(e.target.value)}
-                className="bg-stone-950 border border-stone-800 rounded-lg px-2.5 py-1.5 text-xs text-stone-200"
-              >
-                <option value="ALL">O3 Apprentissage : Tous</option>
-                {Object.keys(O3_MAP).map((k) => (
-                  <option key={k} value={k}>
-                    O3: {k}
-                  </option>
-                ))}
-              </select>
-
-              <select
-                value={filterP1}
-                onChange={(e) => setFilterP1(e.target.value)}
-                className="bg-stone-950 border border-stone-800 rounded-lg px-2.5 py-1.5 text-xs text-stone-200"
-              >
-                <option value="ALL">P1 Topologie : Toutes</option>
-                {Object.keys(P1_MAP).map((k) => (
-                  <option key={k} value={k}>
-                    P1: {k}
-                  </option>
-                ))}
-              </select>
-
-              <label className="inline-flex items-center gap-2 text-xs text-stone-300 cursor-pointer select-none px-2">
-                <input
-                  type="checkbox"
-                  checked={paretoOnly}
-                  onChange={(e) => setParetoOnly(e.target.checked)}
-                  className="rounded border-stone-700 bg-stone-900 text-emerald-500"
-                />
-                Front Pareto 4D uniquement
-              </label>
-            </div>
-
-            {/* Variants Table */}
-            <div className="bg-stone-900/70 border border-stone-800 rounded-xl overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b border-stone-800 bg-stone-950/80 text-stone-400 font-mono text-[11px] uppercase">
-                      <th className="py-3 px-3">Rang</th>
-                      <th className="py-3 px-3">Code Variante</th>
-                      <th className="py-3 px-3 text-right">Score Global</th>
-                      <th className="py-3 px-3 text-right">M1 Maîtrise</th>
-                      <th className="py-3 px-3 text-right">M2 Adapt.</th>
-                      <th className="py-3 px-3 text-right">M3 Tension</th>
-                      <th className="py-3 px-3 text-right">M4 Fluidité</th>
-                      <th className="py-3 px-3 text-right">Gain Lecture</th>
-                      <th className="py-3 px-3 text-right">Arbres / Souches / Terr.</th>
-                      <th className="py-3 px-3 text-right">Gestes / Ops</th>
-                      <th className="py-3 px-3 text-center">Pareto 4D</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-stone-800/60 font-mono">
-                    {filteredResults.slice(0, 60).map((r) => {
-                      const isSelected = selectedVariant?.variant_id === r.variant_id;
-                      return (
-                        <tr
-                          key={r.variant_id}
-                          onClick={() => {
-                            setSelectedVariant(r);
-                          }}
-                          className={`transition cursor-pointer ${
-                            isSelected
-                              ? 'bg-emerald-950/40 hover:bg-emerald-950/60'
-                              : 'hover:bg-stone-800/50'
-                          }`}
-                        >
-                          <td className="py-2.5 px-3 font-bold text-stone-300">#{r.rang_global}</td>
-                          <td className="py-2.5 px-3">
-                            <div className="font-semibold text-white">{r.code}</div>
-                            <div className="text-[10px] text-stone-400 font-sans">
-                              {r.O1_eligibilite} · {r.O2_boost} · {r.O3_apprentissage} · {r.P1_topologie} ({r.P3_duree_tours}t)
-                            </div>
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-bold text-emerald-400 text-sm">
-                            {r.score_global.toFixed(2)}
-                          </td>
-                          <td className="py-2.5 px-3 text-right text-stone-200">{r.M1_maitrise.toFixed(1)}</td>
-                          <td className="py-2.5 px-3 text-right text-stone-200">{r.M2_adaptation.toFixed(1)}</td>
-                          <td className="py-2.5 px-3 text-right text-stone-200">{r.M3_tension.toFixed(1)}</td>
-                          <td className="py-2.5 px-3 text-right text-stone-200">{r.M4_simplicite.toFixed(1)}</td>
-                          <td className="py-2.5 px-3 text-right text-emerald-300">
-                            +{r.gain_lecture_vs_uniforme.toFixed(1)}%
-                          </td>
-                          <td className="py-2.5 px-3 text-right text-stone-300">
-                            <span className="text-emerald-400">{r.arbres_fin_pct.toFixed(0)}%</span> /{' '}
-                            <span className="text-amber-400">{r.souches_fin_pct.toFixed(0)}%</span> /{' '}
-                            <span className="text-rose-400">{r.terrasses_fin_pct.toFixed(0)}%</span>
-                          </td>
-                          <td className="py-2.5 px-3 text-right text-stone-300">
-                            {r.gestes_phys_par_tour.toFixed(1)}g / {r.ops_cog_par_tour.toFixed(1)}c
-                          </td>
-                          <td className="py-2.5 px-3 text-center">
-                            {r.is_pareto_4d ? (
-                              <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] border border-emerald-500/30">
-                                PARETO
-                              </span>
-                            ) : (
-                              <span className="text-stone-600">—</span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <div className="px-4 py-2.5 bg-stone-950/60 border-t border-stone-800 text-xs text-stone-400 flex items-center justify-between">
-                <span>
-                  Affichage des {Math.min(60, filteredResults.length)} meilleures variantes sur{' '}
-                  {filteredResults.length} filtrées (cliquez sur une ligne pour inspecter sa courbe tour par tour).
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* TAB 2: MARGINAL SENSITIVITY ANALYSIS */}
-        {activeTab === 'sensitivity' && (
-          <div className="bg-stone-900/70 border border-stone-800 rounded-xl overflow-hidden">
-            <div className="p-4 border-b border-stone-800 flex items-center justify-between">
-              <div>
-                <h2 className="text-sm font-semibold text-white">
-                  Analyse de Sensibilité Marginale (Impact Moyen par Option O1..O5 & Paramètre P1..P3)
-                </h2>
-                <p className="text-xs text-stone-400 mt-0.5">
-                  Effet propre de chaque modalité moyenné sur l&apos;ensemble des variantes évaluées.
-                </p>
-              </div>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
-                <thead>
-                  <tr className="border-b border-stone-800 bg-stone-950/80 text-stone-400 font-mono text-[11px] uppercase">
-                    <th className="py-3 px-4">Facteur</th>
-                    <th className="py-3 px-4">Modalité</th>
-                    <th className="py-3 px-4 text-right">Score Global</th>
-                    <th className="py-3 px-4 text-right">M1 Maîtrise</th>
-                    <th className="py-3 px-4 text-right">M2 Adaptation</th>
-                    <th className="py-3 px-4 text-right">M3 Tension</th>
-                    <th className="py-3 px-4 text-right">M4 Simplicité</th>
-                    <th className="py-3 px-4 text-right">Gain Lecture (%)</th>
-                    <th className="py-3 px-4 text-right">Bascule Centre (pts)</th>
-                    <th className="py-3 px-4 text-right">Gestes Phys/Tour</th>
-                    <th className="py-3 px-4 text-right">Ops Cog/Tour</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-stone-800/60 font-mono">
-                  {sensitivityRows.map((s, idx) => (
-                    <tr key={idx} className="hover:bg-stone-800/40">
-                      <td className="py-2.5 px-4 text-stone-400">{s.Facteur}</td>
-                      <td className="py-2.5 px-4 font-semibold text-white">{s.Modalite}</td>
-                      <td className="py-2.5 px-4 text-right font-bold text-emerald-400">
-                        {s.Score_Global.toFixed(2)}
-                      </td>
-                      <td className="py-2.5 px-4 text-right text-stone-200">{s.M1_Maitrise.toFixed(2)}</td>
-                      <td className="py-2.5 px-4 text-right text-stone-200">{s.M2_Adaptation.toFixed(2)}</td>
-                      <td className="py-2.5 px-4 text-right text-stone-200">{s.M3_Tension.toFixed(2)}</td>
-                      <td className="py-2.5 px-4 text-right text-stone-200">{s.M4_Simplicite.toFixed(2)}</td>
-                      <td className="py-2.5 px-4 text-right text-emerald-300">
-                        +{s.Gain_Lecture_Pct.toFixed(2)}%
-                      </td>
-                      <td className="py-2.5 px-4 text-right text-sky-300">
-                        +{s.Bascule_Centre_pts.toFixed(1)}
-                      </td>
-                      <td className="py-2.5 px-4 text-right text-stone-300">
-                        {s.Gestes_Phys_Tour.toFixed(2)}
-                      </td>
-                      <td className="py-2.5 px-4 text-right text-stone-300">{s.Ops_Cog_Tour.toFixed(2)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {/* TAB 3: TURN-BY-TURN DYNAMICS & 6 DOCTRINES */}
-        {activeTab === 'dynamics' && selectedVariant && turnProfile && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* 6 Iso-Effort Doctrines Response */}
-            <div className="bg-stone-900/70 border border-stone-800 rounded-xl p-5 space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-sm font-semibold text-white flex items-center gap-2">
-                    <ShieldAlert className="w-4 h-4 text-emerald-400" />
-                    Réponse aux 6 Doctrines de Parade Iso-Effort
-                  </h3>
-                  <p className="text-xs text-stone-400 mt-0.5">
-                    Variante sélectionnée : <strong className="font-mono text-white">{selectedVariant.code}</strong>{' '}
-                    (Quota moyen : {selectedVariant.parades_utilisees_moy} parades/partie)
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                {[
-                  {
-                    doc: ALL_DOCTRINES[0],
-                    score: selectedVariant.score_D0_Uniforme,
-                    color: 'bg-stone-500',
-                  },
-                  {
-                    doc: ALL_DOCTRINES[1],
-                    score: selectedVariant.score_D1_Anti_Coupe,
-                    color: 'bg-amber-500',
-                  },
-                  {
-                    doc: ALL_DOCTRINES[2],
-                    score: selectedVariant.score_D2_Anti_Terrassement,
-                    color: 'bg-orange-500',
-                  },
-                  {
-                    doc: ALL_DOCTRINES[3],
-                    score: selectedVariant.score_D3_Chasseur_Boost,
-                    color: 'bg-emerald-500',
-                  },
-                  {
-                    doc: ALL_DOCTRINES[4],
-                    score: selectedVariant.score_D4_Lecteur_Piste_7,
-                    color: 'bg-sky-500',
-                  },
-                  {
-                    doc: ALL_DOCTRINES[5],
-                    score: selectedVariant.score_D5_Contre_Temps,
-                    color: 'bg-rose-500',
-                  },
-                ].map(({ doc, score, color }) => (
-                  <div key={doc.code} className="space-y-1">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-medium text-stone-200">
-                        <strong className="font-mono">{doc.code}</strong> — {doc.name}
-                      </span>
-                      <span className="font-mono font-bold text-white">{score.toFixed(2)}%</span>
-                    </div>
-                    <div className="w-full h-2.5 bg-stone-950 rounded-full overflow-hidden border border-stone-800">
-                      <div
-                        className={`h-full ${color}`}
-                        style={{ width: `${Math.min(100, Math.max(0, score))}%` }}
-                      />
-                    </div>
-                    <p className="text-[11px] text-stone-400">{doc.description}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Turn-by-Turn Evolution Table & Visual Bars */}
-            <div className="bg-stone-900/70 border border-stone-800 rounded-xl p-5 space-y-4">
-              <div>
-                <h3 className="text-sm font-semibold text-white">
-                  Dynamique Temporelle Tour par Tour ({selectedVariant.P3_duree_tours} tours)
-                </h3>
-                <p className="text-xs text-stone-400 mt-0.5">
-                  Évolution moyenne des 3 états de la forêt (Arbres / Souches / Terrassés) et de l&apos;occupation du centre 6-7-8 par le Terrassier.
-                </p>
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs font-mono">
-                  <thead>
-                    <tr className="border-b border-stone-800 text-stone-400 text-[11px] uppercase">
-                      <th className="py-2 px-2">Tour</th>
-                      <th className="py-2 px-2">Répartition Forêt (Vert / Souche / Terrassé)</th>
-                      <th className="py-2 px-2 text-right">Arbres</th>
-                      <th className="py-2 px-2 text-right">Souches</th>
-                      <th className="py-2 px-2 text-right">Terrassés</th>
-                      <th className="py-2 px-2 text-right">Centre 6-7-8 (T)</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-stone-800/60">
-                    {turnProfile.turns.map((turn, i) => {
-                      const tr = turnProfile.trees_pct[i];
-                      const st = turnProfile.stumps_pct[i];
-                      const te = turnProfile.terraced_pct[i];
-                      const ct = turnProfile.center_terrassier_pct[i];
-                      return (
-                        <tr key={turn} className="hover:bg-stone-800/40">
-                          <td className="py-1.5 px-2 font-bold text-stone-300">T{turn}</td>
-                          <td className="py-1.5 px-2 w-44">
-                            <div className="w-full h-3 rounded overflow-hidden flex bg-stone-950">
-                              <div
-                                className="bg-emerald-500 h-full"
-                                style={{ width: `${tr}%` }}
-                                title={`Arbres: ${tr}%`}
-                              />
-                              <div
-                                className="bg-amber-500 h-full"
-                                style={{ width: `${st}%` }}
-                                title={`Souches: ${st}%`}
-                              />
-                              <div
-                                className="bg-rose-600 h-full"
-                                style={{ width: `${te}%` }}
-                                title={`Terrassés: ${te}%`}
-                              />
-                            </div>
-                          </td>
-                          <td className="py-1.5 px-2 text-right text-emerald-400">{tr.toFixed(1)}%</td>
-                          <td className="py-1.5 px-2 text-right text-amber-400">{st.toFixed(1)}%</td>
-                          <td className="py-1.5 px-2 text-right text-rose-400">{te.toFixed(1)}%</td>
-                          <td className="py-1.5 px-2 text-right text-sky-300">{ct.toFixed(1)}%</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* TAB 4: MARKDOWN REPORT */}
-        {activeTab === 'report' && (
-          <div className="bg-stone-900/70 border border-stone-800 rounded-xl p-5 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-800 pb-3">
-              <div>
-                <h2 className="text-sm font-semibold text-white">
-                  Rapport Analytique Complet (campaign_report.md)
-                </h2>
-                <p className="text-xs text-stone-400">
-                  Synthèse prête à exporter au format Markdown identique à la sortie de src/reporter.py.
-                </p>
-              </div>
-              <button
-                onClick={() =>
-                  downloadFile('campaign_report.md', markdownReport, 'text/markdown;charset=utf-8')
-                }
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5" />
-                Télécharger campaign_report.md
-              </button>
-            </div>
-            <pre className="bg-stone-950 border border-stone-800 rounded-xl p-4 text-xs font-mono text-stone-200 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-[600px] overflow-y-auto">
-              {markdownReport}
-            </pre>
           </div>
         )}
       </main>
